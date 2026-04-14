@@ -288,3 +288,258 @@ paths: ["*.py", "app/**/*.py", "main.py"]
 65. Sandbox isolation is mandatory for code execution — use Anthropic's code_execution tool OR containerize
 66. Commit message generation: use `claude-haiku-4-5-20251001` (cheap, fast, good enough)
 67. PR body generation: use `claude-sonnet-4-6` (needs quality reasoning about changes)
+
+## MCP (Model Context Protocol) Integration
+
+> Full MCP build rules → see `MCP-SOP.md`. This section covers SDK-level integration only.
+
+68. MCP is the standardized protocol layer OVER the tool use loop. The 6-step flow:
+    ```
+    1. INIT     → client spawns MCP server subprocess (STDIO) or connects to URL (HTTP)
+    2. DISCOVER → client sends tools/list, server returns all tool schemas
+    3. INJECT   → tool schemas are put into Claude's context via tools= parameter
+    4. DECIDE   → Claude sees user request + tool list, outputs tool_use block
+    5. ROUTE    → MCP client sends tools/call to server, server executes
+    6. RETURN   → server result becomes tool_result block, appended to messages
+    ```
+
+69. **MCP Connector (remote HTTPS servers)** — beta header `mcp-client-2025-11-20`:
+    ```python
+    response = client.beta.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Check the weather in Tokyo"}],
+        mcp_servers=[{
+            "type": "url",
+            "url": "https://my-weather-server.example.com/sse",
+            "name": "weather",
+            "authorization_token": "OAUTH_TOKEN",  # optional
+        }],
+        tools=[{"type": "mcp_toolset", "mcp_server_name": "weather"}],
+        betas=["mcp-client-2025-11-20"],
+    )
+    ```
+
+70. MCP Connector supports `https://` URLs ONLY — STDIO servers cannot connect via MCP Connector
+71. Use allowlist to expose only specific tools from a server:
+    ```python
+    tools=[{
+        "type": "mcp_toolset",
+        "mcp_server_name": "weather",
+        "default_config": {"enabled": False},           # block everything by default
+        "configs": {"get_weather": {"enabled": True}},  # allow only this one
+    }]
+    ```
+72. MCP response includes two new block types — handle them in tool loop:
+    - `mcp_tool_use` — Claude calling an MCP tool (similar to `tool_use`)
+    - `mcp_tool_result` — server's response to that call
+73. **STDIO MCP servers** (local Python) — use `mcp` package directly, NOT via MCP Connector:
+    ```python
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    server_params = StdioServerParameters(command="python", args=["server.py"])
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            # convert to Anthropic format and pass as tools= in messages.create
+    ```
+74. NEVER use `print()` in an MCP server — stdout is the JSON-RPC wire, print corrupts the protocol
+75. Always log MCP servers to `stderr` — `logging.basicConfig(stream=sys.stderr, level=logging.INFO)`
+76. Use `@mcp.tool` from `fastmcp` for server-side tool definition — docstring IS the tool schema
+77. Docstring must answer 4 things: what it does, parameter format + example, return format + example, error strings
+
+## Claude Agent SDK — Multi-Agent Patterns
+
+78. Install: `pip install claude-agent-sdk`. The SDK wraps the Claude agent runtime with an async generator loop:
+    ```python
+    from claude_agent_sdk import query, ClaudeAgentOptions
+
+    async for message in query(
+        prompt="Fix the authentication bug in auth.py",
+        options=ClaudeAgentOptions(
+            allowed_tools=["Read", "Edit", "Bash"],
+            permission_mode="acceptEdits",
+        ),
+    ):
+        if hasattr(message, "content"):
+            for block in message.content:
+                if hasattr(block, "text"):
+                    print(block.text)
+    ```
+
+79. **Orchestrator/worker topology** — define workers as `AgentDefinition`, orchestrator invokes via `"Agent"` tool:
+    ```python
+    from claude_agent_sdk import AgentDefinition
+
+    options = ClaudeAgentOptions(
+        allowed_tools=["Read", "Grep", "Agent"],   # "Agent" required to spawn workers
+        agents={
+            "security-scanner": AgentDefinition(
+                description="Scans code for security vulnerabilities. Use for any security review.",
+                prompt="You are a security expert. Identify vulnerabilities.",
+                tools=["Read", "Grep"],            # workers: read-only is safest
+                model="opus",
+            ),
+            "test-runner": AgentDefinition(
+                description="Runs pytest and analyzes failures. Use to execute tests.",
+                prompt="You are a test engineer. Run tests and report results.",
+                tools=["Bash", "Read"],
+                model="sonnet",
+            ),
+        },
+    )
+    ```
+80. Subagents CANNOT spawn subagents — NEVER put `"Agent"` in a subagent's tools list
+81. **Parallel execution** — `asyncio.gather` runs multiple workers concurrently:
+    ```python
+    security_result, coverage_result = await asyncio.gather(
+        run_worker("security-scanner", "Scan src/ for vulnerabilities"),
+        run_worker("coverage-analyzer", "Analyze test coverage for src/"),
+    )
+    ```
+82. **Sequential handoffs** — pass output of one agent as prompt to next (string injection):
+    ```python
+    research = await collect_result("Research FastAPI auth best practices", tools=["WebSearch"])
+    implementation = await collect_result(f"Based on:\n{research}\n\nImplement JWT in auth.py", tools=["Read","Write"])
+    ```
+83. Resume a session across turns: `ClaudeAgentOptions(resume=session_id)` — subagent retains full history
+84. `AgentDefinition.model` accepts `"sonnet" | "opus" | "haiku" | "inherit"` — use `"inherit"` to match parent
+85. Always pass context explicitly in the prompt string — that is the only channel from orchestrator to subagent
+
+## Managed Agents (beta)
+
+86. Managed Agents = Anthropic runs the agent loop, container, and tool execution for you (beta `managed-agents-2026-04-01`):
+    ```python
+    # 1. Create reusable agent definition
+    agent = client.beta.agents.create(
+        name="Coding Assistant",
+        model="claude-sonnet-4-6",
+        system="You are a helpful coding assistant.",
+        tools=[{"type": "agent_toolset_20260401"}],  # built-in: bash, files, web search
+    )
+    # 2. Create environment (cloud container)
+    environment = client.beta.environments.create(
+        name="my-env",
+        config={"type": "cloud", "networking": {"type": "unrestricted"}},
+    )
+    # 3. Start session
+    session = client.beta.sessions.create(
+        agent=agent.id, environment_id=environment.id, title="Fix auth bug"
+    )
+    # 4. Stream events
+    with client.beta.sessions.events.stream(session.id) as stream:
+        client.beta.sessions.events.send(
+            session.id,
+            events=[{"type": "user.message", "content": [{"type": "text", "text": "Fix auth.py"}]}],
+        )
+        for event in stream:
+            if event.type == "session.status_idle":
+                break
+    ```
+87. `agent_toolset_20260401` includes: Bash, file ops (read/write/edit/glob/grep), web search, web fetch, MCP servers
+88. Rate limits: 60 req/min create endpoints, 600 req/min read/stream endpoints
+89. Use Managed Agents when you want zero infrastructure — Anthropic handles sandboxing and tool execution
+
+## Advisor Tool (beta)
+
+90. Advisor Tool pairs a fast executor model with a smarter advisor model mid-generation (beta `advisor-tool-2026-03-01`):
+    ```python
+    tools = [{
+        "type": "advisor_20260301",
+        "name": "advisor",                     # must be exactly "advisor"
+        "model": "claude-opus-4-6",            # advisor model
+        "max_uses": 5,                         # optional per-request cap
+    }]
+    response = client.beta.messages.create(
+        model="claude-sonnet-4-6",             # executor model
+        max_tokens=4096,
+        betas=["advisor-tool-2026-03-01"],
+        tools=tools,
+        messages=[{"role": "user", "content": "Design a concurrent worker pool"}],
+    )
+    ```
+91. Valid executor/advisor pairs: haiku+opus, sonnet+opus, opus+opus — invalid pairs return 400
+92. Advisor tokens are billed at advisor model rates — appear in `usage.iterations[]`
+93. Advisor output does NOT stream — SSE pauses while advisor runs, then result arrives whole
+94. In multi-turn: pass `advisor_tool_result` blocks back — removing them mid-conversation causes 400
+95. Use Advisor Tool for: complex architecture decisions, hard debugging, security audits — NOT simple tasks
+
+## Tool Search Tool
+
+96. Tool Search Tool enables dynamic tool discovery for large catalogs (10+ tools) — no beta header needed:
+    ```python
+    tools = [
+        {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+        # mark large catalog tools as deferred — not loaded into context until searched
+        {"name": "get_weather", "description": "...", "input_schema": {...}, "defer_loading": True},
+        {"name": "search_files", "description": "...", "input_schema": {...}, "defer_loading": True},
+        # always-loaded tools: no defer_loading
+        {"name": "list_files", "description": "...", "input_schema": {...}},
+    ]
+    ```
+97. At least one tool must NOT have `defer_loading` — at least one must always be in context
+98. Supports up to 10,000 tools in catalog — use for large MCP server sets (GitHub+Slack+Sentry+Grafana = ~55k tokens → saves 85%)
+99. Use `tool_search_tool_bm25` for natural language searches; `tool_search_tool_regex` for pattern matching
+100. NEVER add `defer_loading` to the search tool itself — it must always be loaded
+
+## Compaction API (context summarization)
+
+101. Compaction auto-summarizes context when token threshold is hit — prevents context overflow in long agent runs:
+     ```python
+     runner = client.beta.messages.tool_runner(
+         model="claude-sonnet-4-6",
+         max_tokens=4096,
+         tools=tools,
+         messages=messages,
+         compaction_control={
+             "enabled": True,
+             "context_token_threshold": 50000,   # compact when context reaches this size
+         },
+     )
+     final = runner.get_final_message()
+     ```
+102. Compaction threshold guidelines: 5k–20k for sequential per-item tasks, 50k–100k for general workflows
+103. Detecting compaction: if `len(messages)` decreases between turns, compaction occurred
+104. Typical savings: 58% token reduction in multi-step agent workflows (208k → 86k tokens)
+105. For Opus 4.6: use server-side automatic compaction (no config needed) — preferred over SDK-level
+
+## A2A Protocol (Agent-to-Agent)
+
+106. A2A is Google's open standard (Apache 2.0) for inter-agent communication across frameworks (Claude ↔ Gemini ↔ LangChain etc.)
+107. Every A2A agent exposes an **Agent Card** at `GET /v1/agentCard` — declares capabilities, skills, auth scheme
+108. Wire format: JSON-RPC 2.0 over HTTPS + SSE for streaming. Install: `pip install a2a-sdk`
+109. **Wrap an Anthropic agent as an A2A server:**
+     ```python
+     from a2a.server import A2AServer, Task
+     import anthropic
+
+     claude = anthropic.Anthropic()
+
+     class ClaudeA2AAgent(A2AServer):
+         async def handle_message(self, task: Task) -> Task:
+             user_text = task.messages[-1].parts[0].text
+             response = claude.messages.create(
+                 model="claude-sonnet-4-6",
+                 max_tokens=2048,
+                 messages=[{"role": "user", "content": user_text}]
+             )
+             task.artifacts = [{"parts": [{"type": "text", "text": response.content[0].text}]}]
+             task.state = "completed"
+             return task
+     ```
+110. **Call another A2A agent from your Anthropic code:**
+     ```python
+     import httpx
+     # Discover capabilities
+     card = httpx.get("https://other-agent.example.com/v1/agentCard").json()
+     # Send task
+     result = httpx.post("https://other-agent.example.com", json={
+         "jsonrpc": "2.0", "method": "SendMessage", "id": "1",
+         "params": {"message": {"role": "user", "parts": [{"type": "text", "text": "..."}]}}
+     })
+     ```
+111. A2A task states: `working` → `completed` | `failed` | `input_required` | `canceled`
+112. Use A2A when you need: cross-framework agent calls, published agent services, multi-company agent pipelines
+113. There is NO Anthropic SDK native A2A integration — wrap the Messages API yourself in an A2A handler

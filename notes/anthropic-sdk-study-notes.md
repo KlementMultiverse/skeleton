@@ -483,23 +483,331 @@ response = await client.messages.create(
 
 ---
 
-## How all 14 concepts connect in the coding agent
+## Concept 15 — MCP (Model Context Protocol) Integration
 
+**Analogy:** MCP is the USB-C standard for AI tools. Before MCP, every app had its own tool format. With MCP, any AI app can plug into any MCP server without custom code — same protocol, same message format.
+
+**The 6-step flow (from Week 2-3 of the course):**
 ```
-1. Client init        → AsyncAnthropic created once at startup
-2. Messages API       → send task + conversation history; always check stop_reason
-3. Tool use loop      → read files, write files, run commands — the agent loop
-4. Streaming          → show progress to user in real-time
-5. Token counting     → check codebase fits in context before sending
-6. Prompt caching     → 1-hour TTL; cache codebase content (same across turns)
-7. Structured output  → output_config= for Pydantic-shaped responses
-8. Error handling     → retry on rate limits, fail fast on bad requests
-9. Context mgmt       → 1M window; truncate old tool results when nearing limit
-10. Ext. thinking     → hard debugging and architecture decisions
-11. Vision            → read UI screenshots, error dialogs
-12. Batches API       → 50% cheaper nightly summaries, bulk analysis
-13. Files API         → upload codebase once, reference across all turns
-14. Server-side tools → GA: web search, code execution, memory — no infra needed
+1. INIT     → client spawns MCP server (STDIO) or connects to URL (HTTP/SSE)
+2. DISCOVER → tools/list → server returns all tool schemas + descriptions
+3. INJECT   → tool schemas go into Claude's context as tools= parameter
+4. DECIDE   → Claude sees task + tools, outputs tool_use block
+5. ROUTE    → MCP client sends tools/call to server, server executes
+6. RETURN   → result becomes tool_result, appended to messages → loop continues
 ```
 
-This is the complete Anthropic SDK layer of the coding agent.
+**Two integration paths:**
+
+*Path A — Remote server via MCP Connector (beta):*
+```python
+response = client.beta.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Check weather in Tokyo"}],
+    mcp_servers=[{
+        "type": "url",
+        "url": "https://my-mcp-server.example.com/sse",
+        "name": "weather",
+    }],
+    tools=[{"type": "mcp_toolset", "mcp_server_name": "weather"}],
+    betas=["mcp-client-2025-11-20"],
+)
+```
+Anthropic's servers handle the MCP client connection. You don't manage it.
+
+*Path B — Local STDIO server (manual):*
+```python
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+server_params = StdioServerParameters(command="python", args=["weather_server.py"])
+async with stdio_client(server_params) as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        # convert to Anthropic format → pass as tools= in messages.create
+```
+
+**3 Hard Rules for building MCP servers (from MCP-SOP.md):**
+1. **NEVER `print()`** — stdout is the JSON-RPC wire. `print()` corrupts the protocol. Use `logging` to `stderr`.
+2. **Always `async def`** for tools that make network calls — use `httpx`, never `requests`
+3. **Docstring IS the tool schema** — FastMCP sends your docstring to Claude. It must answer: what does it do, parameter format + example, return format + example, error strings
+
+**Transport choice:**
+- STDIO → personal, runs on your machine, one connection at a time
+- HTTP/SSE → shared, cloud-hosted, multiple concurrent users
+
+---
+
+## Concept 16 — Claude Agent SDK (Multi-Agent Patterns)
+
+**Analogy:** A law firm. The senior partner (orchestrator) takes the case, assigns research to one associate, drafting to another, both work in parallel, partner reviews the combined output.
+
+Install: `pip install claude-agent-sdk`
+
+**Pattern 1 — Basic agent loop:**
+```python
+from claude_agent_sdk import query, ClaudeAgentOptions
+
+async for message in query(
+    prompt="Review auth.py for security issues",
+    options=ClaudeAgentOptions(
+        allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="acceptEdits",
+    ),
+):
+    if hasattr(message, "content"):
+        for block in message.content:
+            if hasattr(block, "text"):
+                print(block.text)
+```
+
+**Pattern 2 — Orchestrator/worker topology:**
+```python
+from claude_agent_sdk import AgentDefinition
+
+options = ClaudeAgentOptions(
+    allowed_tools=["Read", "Grep", "Agent"],   # "Agent" = can spawn workers
+    agents={
+        "security-scanner": AgentDefinition(
+            description="Scans code for security issues. Use for any security review.",
+            prompt="You are a security expert. Find vulnerabilities.",
+            tools=["Read", "Grep"],   # workers: read-only is safest
+            model="opus",
+        ),
+        "test-runner": AgentDefinition(
+            description="Runs tests and analyzes failures.",
+            prompt="You are a test engineer.",
+            tools=["Bash", "Read"],
+            model="sonnet",
+        ),
+    },
+)
+```
+Claude decides which worker to call based on each `description`. Workers CANNOT spawn more workers.
+
+**Pattern 3 — Parallel execution:**
+```python
+security_result, coverage_result = await asyncio.gather(
+    run_worker("security-scanner", "Scan src/ for vulnerabilities"),
+    run_worker("coverage-analyzer", "Analyze test coverage"),
+)
+```
+
+**Pattern 4 — Sequential handoff (output of A → input to B):**
+```python
+research = await collect_result("Research FastAPI auth best practices", tools=["WebSearch"])
+code = await collect_result(f"Based on:\n{research}\nImplement JWT auth", tools=["Write","Edit"])
+review = await collect_result(f"Review this implementation:\n{code}", tools=["Read","Grep"])
+```
+
+**Key rules:**
+- Subagents CANNOT spawn subagents — never put `"Agent"` in a worker's tools
+- Context passes via prompt string — only channel from orchestrator to worker
+- Resume sessions: `ClaudeAgentOptions(resume=session_id)` — worker retains full history
+
+---
+
+## Concept 17 — Managed Agents (beta)
+
+**Analogy:** AWS Lambda for agents. You define what the agent does; Anthropic runs the container, the loop, the tools, the sandboxing. You just stream the results.
+
+```python
+# 1. Define the agent once (reusable)
+agent = client.beta.agents.create(
+    name="Coding Assistant",
+    model="claude-sonnet-4-6",
+    system="You are a helpful coding assistant.",
+    tools=[{"type": "agent_toolset_20260401"}],  # built-in: bash, files, web search
+)
+
+# 2. Environment = cloud container config
+environment = client.beta.environments.create(
+    name="my-env",
+    config={"type": "cloud", "networking": {"type": "unrestricted"}},
+)
+
+# 3. Session = one running instance
+session = client.beta.sessions.create(
+    agent=agent.id, environment_id=environment.id, title="Fix the auth bug"
+)
+
+# 4. Stream events
+with client.beta.sessions.events.stream(session.id) as stream:
+    client.beta.sessions.events.send(session.id, events=[{
+        "type": "user.message",
+        "content": [{"type": "text", "text": "Fix auth.py"}],
+    }])
+    for event in stream:
+        if event.type == "agent.message":
+            for block in event.content:
+                print(block.text, end="")
+        if event.type == "session.status_idle":
+            break
+```
+
+`agent_toolset_20260401` includes: Bash, file read/write/edit/glob/grep, web search, web fetch, MCP servers.
+
+**When to use:** You want zero infrastructure — no container management, no tool implementation, no loop management. Anthropic handles all of it.
+
+---
+
+## Concept 18 — Advisor Tool (beta)
+
+**Analogy:** A junior developer (executor) coding fast, occasionally asking a senior architect (advisor) for strategic guidance. The junior handles the routine work; the senior only gets involved for hard decisions.
+
+```python
+tools = [{
+    "type": "advisor_20260301",
+    "name": "advisor",          # must be exactly "advisor"
+    "model": "claude-opus-4-6", # advisor = smarter, slower, more expensive
+    "max_uses": 5,              # cap per request to control cost
+}]
+
+response = client.beta.messages.create(
+    model="claude-sonnet-4-6",  # executor = fast, cheap
+    max_tokens=4096,
+    betas=["advisor-tool-2026-03-01"],
+    tools=tools,
+    messages=[{"role": "user", "content": "Design a concurrent worker pool in Go"}],
+)
+```
+
+The executor calls the advisor autonomously when it needs strategic guidance. You don't control when — Claude decides.
+
+**Cost model:** Advisor tokens are billed at Opus rates and appear in `usage.iterations[]`, separate from executor tokens.
+
+**Key rules:**
+- Advisor output doesn't stream — SSE pauses while advisor runs
+- In multi-turn conversations: always pass `advisor_tool_result` blocks back — removing them causes 400
+- Valid pairs: haiku+opus, sonnet+opus, opus+opus
+
+**When to use:** Architecture decisions, complex debugging, security audits — not for simple tasks.
+
+---
+
+## Concept 19 — Tool Search Tool + Compaction API
+
+### Tool Search Tool
+
+**Analogy:** A phone directory. Instead of reading every name aloud to the model (expensive), you give it a search function and it looks up what it needs.
+
+```python
+tools = [
+    # The search tool — always loaded, never defer
+    {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+    # Large catalog — deferred (not in context until searched)
+    {"name": "get_weather", "description": "...", "input_schema": {...}, "defer_loading": True},
+    {"name": "query_database", "description": "...", "input_schema": {...}, "defer_loading": True},
+    # Always loaded (small set, always needed)
+    {"name": "list_files", "description": "...", "input_schema": {...}},
+]
+```
+
+Supports up to 10,000 tools. A typical multi-server MCP setup (GitHub+Slack+Sentry+Grafana+Splunk = ~55k tokens) reduces to <8k tokens — **85% savings**.
+
+Use `tool_search_tool_bm25` for natural language search; `tool_search_tool_regex` for pattern matching.
+
+### Compaction API
+
+**Analogy:** Meeting minutes. Instead of re-reading the full 3-hour meeting transcript every time, you refer to the 1-page summary.
+
+```python
+runner = client.beta.messages.tool_runner(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    tools=tools,
+    messages=messages,
+    compaction_control={
+        "enabled": True,
+        "context_token_threshold": 50000,  # compact when context hits this
+    },
+)
+final = runner.get_final_message()
+```
+
+Real savings: 208k tokens → 86k tokens (58% reduction) in a multi-step agent workflow. For Opus 4.6, server-side automatic compaction is preferred (no config needed).
+
+---
+
+## Concept 20 — A2A Protocol (Agent-to-Agent)
+
+**Analogy:** REST APIs let services talk to services. A2A lets agents talk to agents — same idea, but the "service" is another AI agent.
+
+A2A (Google, Apache 2.0, April 2025) is the open standard for agents built on different frameworks to communicate. A Claude agent can call a Gemini agent and vice versa.
+
+**Agent Card** — every A2A agent publishes at `GET /v1/agentCard`:
+```json
+{
+  "name": "weather-agent",
+  "skills": [{"id": "current-weather", "name": "Get Current Weather"}],
+  "capabilities": {"streaming": true},
+  "url": "https://weather-agent.example.com"
+}
+```
+
+**Wrapping Anthropic as an A2A server:**
+```python
+from a2a.server import A2AServer, Task
+import anthropic
+
+claude = anthropic.Anthropic()
+
+class ClaudeA2AAgent(A2AServer):
+    async def handle_message(self, task: Task) -> Task:
+        response = claude.messages.create(
+            model="claude-sonnet-4-6", max_tokens=2048,
+            messages=[{"role": "user", "content": task.messages[-1].parts[0].text}]
+        )
+        task.artifacts = [{"parts": [{"type": "text", "text": response.content[0].text}]}]
+        task.state = "completed"
+        return task
+```
+
+**Calling another A2A agent from your code:**
+```python
+import httpx
+result = httpx.post("https://other-agent.example.com", json={
+    "jsonrpc": "2.0", "method": "SendMessage", "id": "1",
+    "params": {"message": {"role": "user", "parts": [{"type": "text", "text": "your task"}]}}
+})
+```
+
+**Wire format:** JSON-RPC 2.0 over HTTPS. Streaming via SSE. Task states: `working` → `completed` | `failed` | `input_required`.
+
+**When to use:** Cross-framework agent pipelines, published agent services, multi-company integrations. There is no Anthropic SDK native A2A support — you wrap the Messages API yourself.
+
+---
+
+## How all 20 concepts connect in the coding agent
+
+```
+CORE SDK
+1. Client init        → AsyncAnthropic once at startup; max_retries=3; explicit timeout
+2. Messages API       → always check stop_reason (end_turn/tool_use/max_tokens/exceeded)
+3. Tool use loop      → the agent loop — while stop_reason=="tool_use": execute → send back
+4. Streaming          → show output token by token; get_final_message() for usage stats
+5. Token counting     → count before large calls; 90% threshold → truncate middle
+6. Prompt caching     → 1-hour TTL, min 1024 tokens; auto-caching mode available
+7. Structured output  → output_config={"format": {...}} — returns Pydantic-shaped JSON
+8. Error handling     → RETRY: 429/connection/timeout/529. NEVER RETRY: 400/401/403/validation
+9. Context mgmt       → 1M tokens (Sonnet/Opus 4.6); truncate middle; cap codebase at 50k
+
+ADVANCED SDK
+10. Ext. thinking     → effort= for Opus 4.6; budget_tokens= for Sonnet; display="omitted"
+11. Vision            → base64 or URL images as content blocks; up to 20 per request
+12. Batches API       → 50% cheaper; 24hr processing; bulk classification / nightly jobs
+13. Files API         → upload once, reference by file_id across many requests (beta)
+14. Server-side tools → GA: web_search, web_fetch, code_execution, memory_tool
+
+AGENTIC LAYER
+15. MCP integration   → 6-step flow; Connector for remote; mcp package for STDIO; never print()
+16. Agent SDK         → orchestrator/worker; parallel asyncio.gather; sequential handoffs
+17. Managed Agents    → zero-infra agent hosting; agent+environment+session+events (beta)
+18. Advisor Tool      → executor model + advisor model mid-generation; haiku/sonnet + opus (beta)
+19. Tool Search+Compact → defer_loading for large catalogs; compaction for long runs (beta)
+20. A2A Protocol      → wrap Messages API in A2A handler; JSON-RPC 2.0 inter-agent calls
+```
+
+This is the complete Anthropic SDK + agentic layer of the coding agent.

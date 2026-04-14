@@ -6,9 +6,10 @@ paths: ["**"]
 # Security Rules — Complete (extends security.md)
 
 > This file EXTENDS `security.md`. Do not repeat rules already there.
-> Ownership: BOLA/IDOR, JWT algorithm, SSRF deep, CORS deep, security headers complete,
->   secret management, prompt injection, rate limiting, file uploads, dependency security,
->   audit logging complete, data encryption, PostgreSQL RLS, DoS protection.
+> Ownership: BOLA/IDOR, JWT algorithm attacks, SSRF deep, CORS deep, BFLA, API inventory,
+>   security headers complete, secret management, prompt injection (direct + indirect),
+>   rate limiting, file uploads, dependency security, audit logging, data encryption,
+>   PostgreSQL RLS, DoS protection, auth edge cases.
 
 ---
 
@@ -22,19 +23,19 @@ paths: ["**"]
 
 4. NEVER construct the ownership check as a post-fetch Python `if` — if you fetch the record first and then check in code, the unauthorized read has already happened.
 
-5. ALWAYS implement ownership verification as a FastAPI dependency (or middleware equivalent) so it cannot be accidentally omitted from new routes.
+5. ALWAYS implement ownership verification as a dependency (or middleware equivalent) so it cannot be accidentally omitted from new routes.
 
 ---
 
 ## Mass Assignment
 
-6. ALWAYS define `model_config = ConfigDict(extra="forbid")` on every Pydantic input schema — this rejects unknown fields with a 422 rather than silently ignoring them.
+6. ALWAYS define `extra="forbid"` (Pydantic) or equivalent on every input schema — this rejects unknown fields with a 422 rather than silently ignoring them.
 
 7. NEVER accept these fields from user input under any circumstances: `id`, `owner_id`, `user_id`, `tenant_id`, `role`, `is_admin`, `is_superuser`, `created_at`, `updated_at`, `deleted_at`.
 
 8. ALWAYS use a dedicated `Create` schema and a dedicated `Update` schema — the `Update` schema allows a strict subset of fields compared to the `Create` schema, and neither includes system-controlled fields.
 
-9. NEVER use `model.update(**request.model_dump())` or equivalent ORM bulk-update patterns that map all input keys directly to model attributes.
+9. NEVER use bulk-update patterns that map all input keys directly to model attributes (e.g. `model.update(**request.model_dump())`).
 
 ---
 
@@ -42,13 +43,13 @@ paths: ["**"]
 
 10. ALWAYS use an explicit allowlist for sort column names — store valid columns in a `frozenset`, reject anything not in it with a 422 before it reaches the ORM.
 
-11. NEVER pass sort direction (ASC/DESC) as a raw string — map the user's input to an ORM attribute or a `literal_column` after allowlist validation, never string-interpolate it into SQL.
+11. NEVER pass sort direction (ASC/DESC) as a raw string — map the user's input to an ORM attribute or literal after allowlist validation, never string-interpolate it into SQL.
 
-12. ALWAYS parameterize queries even when the input came from your own database — second-order injection stores a payload safely and injects it at query time later. Parameterize every query regardless of data source.
+12. ALWAYS parameterize queries even when the input came from your own database — second-order injection stores a payload safely and injects it at query time later.
 
-13. NEVER use `text()` with f-strings or `.format()` — use `text("... :param").bindparams(param=value)` exclusively.
+13. NEVER use raw SQL string builders with f-strings or `.format()` — use parameterized queries (`text("... :param").bindparams(param=value)`) exclusively.
 
-14. NEVER dynamically construct `IN (...)` clauses with string joining — use SQLAlchemy's `column.in_(list_of_values)` which generates parameterized placeholders.
+14. NEVER dynamically construct `IN (...)` clauses with string joining — use your ORM's `column.in_(list_of_values)` which generates parameterized placeholders.
 
 ---
 
@@ -70,176 +71,235 @@ paths: ["**"]
 
 22. ALWAYS use at least 32 bytes of cryptographic randomness for HS256 secrets — generate with `secrets.token_urlsafe(32)`, never with a human-readable passphrase.
 
+23. NEVER trust the `kid` (Key ID) JWT header parameter as safe input — validate it against a hardcoded allowlist of known key IDs before any lookup; never pass the raw `kid` value into a file path or SQL query (path traversal and SQL injection via `kid` are a documented attack class).
+
+24. NEVER use the `jku` (JSON Web Key Set URL) or `x5u` (X.509 URL) JWT header parameters unless you enforce a strict per-service allowlist of permitted key-hosting domains validated at startup — an attacker can replace these headers to point to their own JWKS endpoint, causing your server to verify tokens signed with an attacker-controlled key (active CVEs in 2025: CVE-2025-4692, CVE-2025-30144).
+
 ---
 
 ## SSRF Prevention — Deep
 
-23. ALWAYS resolve the hostname to an IP and check the IP against RFC1918 ranges — checking only the domain name is bypassable with DNS rebinding.
+25. ALWAYS resolve the hostname to an IP and check the IP against RFC1918 ranges — checking only the domain name is bypassable with DNS rebinding.
 
-24. NEVER follow redirects in server-side HTTP requests to user-supplied URLs — an attacker can redirect through a public URL to an internal address. Set `follow_redirects=False`.
+26. NEVER follow redirects in server-side HTTP requests to user-supplied URLs — an attacker can redirect through a public URL to an internal address. Set `follow_redirects=False`.
 
-25. ALWAYS block the AWS instance metadata endpoint `169.254.169.254` — add it to your private IP check; it is a link-local address (`ip.is_link_local`) and RFC1918 checks may miss it depending on the library.
+27. ALWAYS block the AWS instance metadata endpoint `169.254.169.254` — add it to your private IP check; it is a link-local address (`ip.is_link_local`) and RFC1918 checks may miss it depending on the library.
 
-26. ALWAYS check `ip.is_private`, `ip.is_loopback`, `ip.is_link_local`, and `ip.is_reserved` — all four conditions must be blocked, not just `is_private`.
+28. ALWAYS check `ip.is_private`, `ip.is_loopback`, `ip.is_link_local`, and `ip.is_reserved` — all four conditions must be blocked, not just `is_private`.
 
-27. ALWAYS validate the URL scheme before resolving — reject anything that is not `https`; block `file://`, `ftp://`, `gopher://`, and `dict://`.
+29. ALWAYS validate the URL scheme before resolving — reject anything that is not `https`; block `file://`, `ftp://`, `gopher://`, and `dict://`.
 
-28. PREFER an explicit domain allowlist over a blocklist — blocklists have gaps; allowlists are closed by default.
+30. PREFER an explicit domain allowlist over a blocklist — blocklists have gaps; allowlists are closed by default.
+
+31. ALWAYS strip these headers from any outbound request your server makes on behalf of user-supplied input: `X-aws-ec2-metadata-token-ttl-seconds`, `X-aws-ec2-metadata-token`, and `Metadata: true` (Azure IMDS) — an attacker who injects these headers can defeat IMDSv2 protections even when `169.254.169.254` is blocked by IP.
 
 ---
 
 ## CORS — Deep Configuration
 
-29. NEVER echo back the request `Origin` header as `Access-Control-Allow-Origin` — dynamic origin reflection grants the same access as a wildcard while appearing specific. Validate against a hardcoded allowlist.
+32. NEVER echo back the request `Origin` header as `Access-Control-Allow-Origin` — dynamic origin reflection grants the same access as a wildcard while appearing specific. Validate against a hardcoded allowlist.
 
-30. NEVER load the CORS allowlist from a database at request time — an attacker who controls the DB controls your CORS policy. The allowlist must be in environment config at startup.
+33. NEVER load the CORS allowlist from a database at request time — an attacker who controls the DB controls your CORS policy. The allowlist must be in environment config at startup.
 
-31. NEVER set `allow_credentials=True` with `allow_origins=["*"]` — browsers block this combination but some server implementations bypass it via reflection; defense must be server-side.
+34. NEVER set `allow_credentials=True` with `allow_origins=["*"]` — browsers block this combination but some server implementations bypass it via reflection; defense must be server-side.
 
-32. ALWAYS set `max_age` on your CORS middleware to reduce preflight request volume — 600 seconds (10 minutes) is a reasonable production default.
+35. ALWAYS set `max_age` on your CORS middleware to reduce preflight request volume — 600 seconds (10 minutes) is a reasonable production default.
 
-33. ALWAYS keep separate `ALLOWED_ORIGINS` lists for development and production — never add `localhost` origins to the production list.
+36. ALWAYS keep separate `ALLOWED_ORIGINS` lists for development and production — never add `localhost` origins to the production list.
+
+---
+
+## Broken Function Level Authorization (BFLA)
+
+37. ALWAYS attach an explicit role/permission check to every non-GET endpoint — never rely on URL path prefix (`/admin/`) as the sole access control; prefix obscurity is not authorization.
+
+38. ALWAYS reject `X-HTTP-Method-Override` headers at the middleware layer unless your application has a documented reason to support them — these headers allow a POST to masquerade as a DELETE or PUT, bypassing method-level access controls.
+
+39. NEVER grant access based on a field in the request body that should be admin-only — use server-side role checks, not client-supplied role flags.
+
+---
+
+## API Inventory and Lifecycle
+
+40. ALWAYS generate an OpenAPI schema at startup and fail CI if it diverges from the committed spec — shadow APIs (undocumented endpoints deployed without security review) are OWASP API9:2023 and go unmonitored and unpatched.
+
+41. ALWAYS set a `Sunset` response header (RFC 8594) on any deprecated endpoint, indicating the removal date — clients must be informed before removal; this forces you to track which endpoints are scheduled for decommissioning.
+
+42. ALWAYS remove deprecated API versions from routing when a new major version ships — not just from documentation; zombie endpoints (old versions still reachable in production) are unmonitored and unpatched.
+
+---
+
+## Unsafe Third-Party API Consumption
+
+43. ALWAYS validate third-party API responses with Pydantic schemas before using the data — external API responses are untrusted input; treat them identically to user input from the web.
+
+44. NEVER propagate a redirect from a third-party API response directly to your client — validate any URL in a third-party response body against the same SSRF blocklist you apply to user input.
+
+45. ALWAYS set both connect and read timeouts on third-party API calls — a slow or malicious upstream that never responds will hold your connection pool; missing timeouts cause cascading failures.
 
 ---
 
 ## Security Headers — Complete Set
 
-34. ALWAYS set `Strict-Transport-Security: max-age=31536000; includeSubDomains` — 1 year is the minimum; add `preload` only after verifying all subdomains support HTTPS.
+> Note: `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY` are in `security.md` rules 24-25.
+> This section covers the remaining required headers.
 
-35. ALWAYS set a `Content-Security-Policy` header — start with `default-src 'self'` and open up only what your frontend requires; CSP is the primary defense against XSS after input validation fails.
+46. ALWAYS set `Strict-Transport-Security: max-age=31536000; includeSubDomains` — 1 year is the minimum; add `preload` only after verifying all subdomains support HTTPS.
 
-36. NEVER set `X-XSS-Protection: 1` or `X-XSS-Protection: 1; mode=block` — set `0` instead; the old browser XSS auditor has known bypass exploits and has been removed from modern browsers; your CSP handles this now.
+47. ALWAYS set a `Content-Security-Policy` header — start with `default-src 'self'` and open up only what your frontend requires; CSP is the primary defense against XSS after input validation fails.
 
-37. ALWAYS set `Referrer-Policy: strict-origin-when-cross-origin` — this sends the full path on same-origin requests (for analytics) but only the origin on cross-origin requests (no path leakage).
+48. NEVER set `X-XSS-Protection: 1` or `X-XSS-Protection: 1; mode=block` — set `0` instead; the old browser XSS auditor has known bypass exploits and has been removed from modern browsers; your CSP handles this now.
 
-38. ALWAYS set `Permissions-Policy` to disable browser features your app does not use — at minimum disable `geolocation=(), microphone=(), camera=(), payment=()`.
+49. ALWAYS set `Referrer-Policy: strict-origin-when-cross-origin` — this sends the full path on same-origin requests (for analytics) but only the origin on cross-origin requests (no path leakage).
 
-39. NEVER allow the `Server` header to reveal your server software version — strip or replace it in your reverse proxy configuration.
+50. ALWAYS set `Permissions-Policy` to disable browser features your app does not use — at minimum disable `geolocation=(), microphone=(), camera=(), payment=()`.
+
+51. NEVER allow the `Server` header to reveal your server software version — strip or replace it in your reverse proxy configuration.
 
 ---
 
 ## Secret Management — Deep
 
-40. ALWAYS use `pydantic.SecretStr` for any field that holds a credential — `SecretStr` renders as `**********` in `str()`, `repr()`, `json()`, and logging; the actual value requires `.get_secret_value()`.
+52. ALWAYS use `pydantic.SecretStr` or equivalent for any field that holds a credential — `SecretStr` renders as `**********` in `str()`, `repr()`, and logging; the actual value requires `.get_secret_value()`.
 
-41. NEVER call `.get_secret_value()` outside the specific function that needs to use the credential — do not unwrap and store it in a variable that gets passed around.
+53. NEVER call `.get_secret_value()` outside the specific function that needs the credential — do not unwrap and store it in a variable that gets passed around.
 
-42. ALWAYS generate secrets with `secrets.token_urlsafe(32)` — never use `random`, `uuid4`, or `os.urandom` for security tokens; `secrets` is the stdlib module designed for this.
+54. ALWAYS generate secrets with `secrets.token_urlsafe(32)` — never use `random`, `uuid4`, or `os.urandom` for security tokens; `secrets` is the stdlib module designed for this.
 
-43. ALWAYS have a key rotation procedure documented and tested before production — rotation without a plan means a compromised key cannot be invalidated quickly.
+55. ALWAYS have a key rotation procedure documented and tested before production — rotation without a plan means a compromised key cannot be invalidated quickly.
 
-44. NEVER rotate a secret by replacing it immediately — use the `CURRENT` + `PREVIOUS` pattern: deploy with both, wait for old token TTL, then remove the old key.
+56. NEVER rotate a secret by replacing it immediately — use the `CURRENT` + `PREVIOUS` pattern: deploy with both, wait for old token TTL, then remove the old key.
 
-45. ALWAYS use a secret manager (AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault) in production for secrets that change — do not manage rotation manually via `.env` files for production systems.
+57. ALWAYS use a secret manager (AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault) in production for secrets that change — do not manage rotation manually via `.env` files for production systems.
+
+58. ALWAYS run `gitleaks` or `trufflehog` as a pre-commit hook AND as a CI step that blocks merge — scan full git history (`--all`) on first install; 23 million hardcoded secrets were added to public GitHub repos in 2024 (+25% YoY).
 
 ---
 
 ## Prompt Injection
 
-46. ALWAYS wrap user-supplied content in explicit delimiters when injecting into LLM prompts — use `<user_message>...</user_message>` and instruct the model that content inside those tags is data, not instructions.
+59. ALWAYS wrap user-supplied content in explicit delimiters when injecting into LLM prompts — use `<user_message>...</user_message>` and instruct the model that content inside those tags is data, not instructions.
 
-47. NEVER inject raw user input directly into an LLM prompt at any position — always delimit, always instruct the model about the boundary.
+60. NEVER inject raw user input directly into an LLM prompt at any position — always delimit, always instruct the model about the boundary.
 
-48. ALWAYS validate LLM output with Pydantic (or equivalent schema) before saving it to a database or taking any action based on it — LLM output is untrusted input.
+61. ALWAYS validate LLM output with Pydantic (or equivalent schema) before saving it to a database or taking any action based on it — LLM output is untrusted input.
 
-49. NEVER expose the full LLM error or raw output in API responses — log it with `exc_info=True`, return a generic error message.
+62. NEVER expose the full LLM error or raw output in API responses — log it with `exc_info=True`, return a generic error message.
 
-50. ALWAYS dispatch tool calls through an explicit allowlist — never use `getattr(module, tool_name)()` or `eval()` to dispatch LLM-requested tool calls; match against a known set of safe callables.
+63. ALWAYS dispatch tool calls through an explicit allowlist — never use `getattr(module, tool_name)()` or `eval()` to dispatch LLM-requested tool calls; match against a known set of safe callables.
 
-51. ALWAYS validate tool arguments with Pydantic schemas before executing — an injection can manipulate tool arguments even if the tool name is on the allowlist.
+64. ALWAYS validate tool arguments with Pydantic schemas before executing — an injection can manipulate tool arguments even if the tool name is on the allowlist.
+
+65. ALWAYS delimit and label retrieved content separately from user instructions in RAG pipelines — use `<retrieved_document source="...">...</retrieved_document>` tags; retrieved documents can contain indirect injection payloads (PoisonedRAG attack: 5 poisoned docs in a corpus of millions can control LLM output 90% of the time for targeted queries). NEVER allow retrieved content to appear in the system prompt position.
 
 ---
 
 ## Rate Limiting — Layered
 
-52. ALWAYS implement at least two layers of rate limiting: edge (CDN/nginx) and application — edge stops volumetric attacks before they reach your app; app-level stops authenticated abuse.
+66. ALWAYS implement at least two layers of rate limiting: edge (CDN/nginx) and application — edge stops volumetric attacks before they reach your app; app-level stops authenticated abuse.
 
-53. ALWAYS add a third business-logic rate limit for expensive operations (LLM calls, password resets, account creation, data exports) separately from the general API rate limit.
+67. ALWAYS add a third business-logic rate limit for expensive operations (LLM calls, password resets, account creation, data exports) separately from the general API rate limit.
 
-54. ALWAYS return `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers with `429` responses — clients need to know the limit, how much remains, and when to retry.
+68. ALWAYS return `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers with `429` responses — clients need to know the limit, how much remains, and when to retry.
 
-55. NEVER rate limit only by IP address for authenticated endpoints — rate limit by `user_id` for authenticated routes; IP-based limits are trivially bypassed with proxies and hurt shared NAT users.
+69. NEVER rate limit only by IP address for authenticated endpoints — rate limit by `user_id` for authenticated routes; IP-based limits are trivially bypassed with proxies and hurt shared NAT users.
 
-56. ALWAYS use a sliding window algorithm (not fixed window) for rate limiting, and always set a TTL on every Redis rate limit key — fixed windows allow 2x burst attacks at window boundaries; missing TTLs cause unbounded memory growth.
+70. ALWAYS use a sliding window algorithm (not fixed window) for rate limiting, and always set a TTL on every Redis rate limit key — fixed windows allow 2x burst attacks at window boundaries; missing TTLs cause unbounded memory growth.
 
 ---
 
 ## File Upload Security
 
-59. NEVER trust file extensions to determine file type — extensions are user-controlled; always read the first 2048 bytes and use a magic bytes library (`python-magic`) to identify the actual MIME type, then enforce an explicit MIME type allowlist.
+71. NEVER trust file extensions to determine file type — extensions are user-controlled; always read the first 2048 bytes and use a magic bytes library (`python-magic`) to identify the actual MIME type, then enforce an explicit MIME type allowlist.
 
-60. ALWAYS rename uploaded files to a UUID before storage and enforce a per-file size limit before buffering — the original filename can contain path traversal sequences, null bytes, or shell metacharacters; checking `Content-Length` before buffering prevents memory exhaustion.
+72. ALWAYS rename uploaded files to a UUID before storage and enforce a per-file size limit before buffering — the original filename can contain path traversal sequences, null bytes, or shell metacharacters; checking `Content-Length` before buffering prevents memory exhaustion.
 
-61. NEVER store uploaded files on the application server's local filesystem — use object storage (S3, GCS, Azure Blob); local storage does not scale and the app server should be stateless.
+73. NEVER store uploaded files on the application server's local filesystem — use object storage (S3, GCS, Azure Blob); local storage does not scale and the app server should be stateless.
 
-62. ALWAYS serve uploaded files via presigned URLs with short TTLs — never construct a direct public URL to a file; presigned URLs enforce authentication and expiry at the storage layer.
+74. ALWAYS serve uploaded files via presigned URLs with short TTLs — never construct a direct public URL to a file; presigned URLs enforce authentication and expiry at the storage layer.
 
-63. NEVER serve user-uploaded files from the same origin as your API — a malicious HTML or JavaScript file served from your origin has the same-origin permissions as your API.
+75. NEVER serve user-uploaded files from the same origin as your API — a malicious HTML or JavaScript file served from your origin has the same-origin permissions as your API.
 
-64. ALWAYS quarantine uploads before serving them — upload to a quarantine prefix, run virus scan (ClamAV, AWS GuardDuty Malware Protection), move to the clean prefix only on pass.
+76. ALWAYS quarantine uploads before serving them — upload to a quarantine prefix, run virus scan (ClamAV, AWS GuardDuty Malware Protection), move to the clean prefix only on pass.
+
+77. ALWAYS check the compression ratio and member count before extracting any archive — reject files where (uncompressed / compressed size) > 100x or member count > a hardcoded limit; decompression bombs (e.g. 42 KB zip expanding to 4.5 GB) bypass file size checks on the uploaded file. Use Python 3.12.3+ which patches CVE-2024-0450.
 
 ---
 
 ## Dependency Security
 
-66. ALWAYS pin exact versions in application `requirements.txt` or `pyproject.toml` — `fastapi==0.115.6` not `fastapi>=0.115`; unpinned deps silently pick up malicious updates.
+78. ALWAYS pin exact versions in application lock files — `fastapi==0.115.6` not `fastapi>=0.115`; unpinned deps silently pick up malicious updates.
 
-67. ALWAYS generate hash-pinned requirements for production deploys — `pip-compile --generate-hashes` produces a `requirements.txt` where each package hash is verified at install time.
+79. ALWAYS generate hash-pinned requirements for production deploys — `pip-compile --generate-hashes` produces a `requirements.txt` where each package hash is verified at install time.
 
-68. ALWAYS run `pip-audit` and `safety` in CI — they check different vulnerability databases (OSV and Safety DB respectively); use both.
+80. ALWAYS run `pip-audit` and `safety` in CI — they check different vulnerability databases (OSV and Safety DB respectively); use both.
 
-69. NEVER install packages with names that differ by one character from well-known packages without verifying the author — typosquatting attacks use `requets`, `fastap1`, `sqlachemy`.
+81. NEVER install packages with names that differ by one character from well-known packages without verifying the author — typosquatting attacks use `requets`, `fastap1`, `sqlachemy`.
 
-70. ALWAYS use Renovate Bot or Dependabot with `pip-audit` on the PR — automated dependency updates must include an automated vulnerability check on the update itself.
+82. ALWAYS use Renovate Bot or Dependabot with `pip-audit` on the PR — automated dependency updates must include an automated vulnerability check on the update itself.
 
 ---
 
 ## Audit Logging — Complete
 
-71. ALWAYS log audit events in the same database transaction as the action they record — if the action rolls back, the audit entry rolls back too; never have phantom audit entries for actions that did not complete.
+83. ALWAYS log audit events in the same database transaction as the action they record — if the action rolls back, the audit entry rolls back too; never have phantom audit entries for actions that did not complete.
 
-72. ALWAYS make audit tables append-only at the ORM level — add `before_update` and `before_delete` listeners that raise a `RuntimeError` to prevent any modification.
+84. ALWAYS make audit tables append-only at the ORM level — add `before_update` and `before_delete` listeners that raise a `RuntimeError` to prevent any modification.
 
-73. NEVER log these in any log entry or audit record: plaintext passwords, password hashes, JWT tokens, session IDs, API keys, full credit card numbers, SSNs, `Authorization` headers, request bodies for `/login` or `/register` endpoints.
+85. NEVER log these in any log entry or audit record: plaintext passwords, password hashes, JWT tokens, session IDs, API keys, full credit card numbers, SSNs, `Authorization` headers, request bodies for `/login` or `/register` endpoints.
 
-74. ALWAYS include these contextual identifiers in every log entry: `user_id`, `tenant_id` (if multi-tenant), `resource_type`, `resource_id`, `ip_address`, and `event` enum value.
+86. ALWAYS include these contextual identifiers in every log entry: `user_id`, `tenant_id` (if multi-tenant), `resource_type`, `resource_id`, `ip_address`, and `event` enum value.
 
-75. ALWAYS use a typed `SecurityEvent` enum (not free-form strings) for audit event types — enumerated events can be searched, graphed, and alerted on reliably.
+87. ALWAYS use a typed `SecurityEvent` enum (not free-form strings) for audit event types — enumerated events can be searched, graphed, and alerted on reliably.
 
 ---
 
 ## Data Encryption — Field-Level and Envelope
 
-76. ALWAYS use `cryptography.fernet.Fernet` for field-level encryption — do not implement your own encryption; Fernet provides AES-128-CBC with HMAC-SHA256 and handles IV generation.
+88. ALWAYS use `cryptography.fernet.Fernet` for field-level encryption — do not implement your own encryption; Fernet provides AES-128-CBC with HMAC-SHA256 and handles IV generation.
 
-77. ALWAYS use `MultiFernet` with two keys during rotation — `MultiFernet([new_key, old_key])` encrypts with `new_key` and decrypts with either; this enables zero-downtime key rotation.
+89. ALWAYS use `MultiFernet` with two keys during rotation — `MultiFernet([new_key, old_key])` encrypts with `new_key` and decrypts with either; this enables zero-downtime key rotation.
 
-78. NEVER store encryption keys in the database alongside the encrypted data — the key and the ciphertext must be separated; store keys in a secret manager or environment variable.
+90. NEVER store encryption keys in the database alongside the encrypted data — the key and the ciphertext must be separated; store keys in a secret manager or environment variable.
 
-79. ALWAYS use envelope encryption for large datasets or KMS integration — generate a DEK (data encryption key) per record or per batch, encrypt the DEK with a KEK (key encryption key) from KMS, store the encrypted DEK with the data.
+91. ALWAYS use envelope encryption for large datasets or KMS integration — generate a DEK (data encryption key) per record or per batch, encrypt the DEK with a KEK (key encryption key) from KMS, store the encrypted DEK with the data.
 
-80. NEVER encrypt columns that are used as WHERE clause filters without a separate lookup index — Fernet ciphertext is not searchable; encrypt only columns that are retrieved but not filtered on, or maintain a separate HMAC index for searchable encryption.
+92. NEVER encrypt columns that are used as WHERE clause filters without a separate lookup index — Fernet ciphertext is not searchable; encrypt only columns that are retrieved but not filtered on, or maintain a separate HMAC index for searchable encryption.
 
 ---
 
 ## PostgreSQL Row-Level Security
 
-81. ALWAYS use `ALTER TABLE ... FORCE ROW LEVEL SECURITY` in addition to `ENABLE ROW LEVEL SECURITY` — without `FORCE`, the table owner bypasses RLS; with `FORCE`, even the owner is subject to the policy.
+93. ALWAYS use `ALTER TABLE ... FORCE ROW LEVEL SECURITY` in addition to `ENABLE ROW LEVEL SECURITY` — without `FORCE`, the table owner bypasses RLS; with `FORCE`, even the owner is subject to the policy.
 
-82. ALWAYS set the per-transaction tenant context via `set_config('app.current_tenant_id', :tid, true)` — the third argument `true` means local to the transaction; it resets automatically on commit or rollback.
+94. ALWAYS set the per-transaction tenant context via `set_config('app.current_tenant_id', :tid, true)` — the third argument `true` means local to the transaction; it resets automatically on commit or rollback.
 
-83. NEVER set `set_config` with `false` (session-scoped) in a connection pool — session-scoped settings persist across requests in a pooled connection; always use transaction-scoped (`true`).
+95. NEVER set `set_config` with `false` (session-scoped) in a connection pool — session-scoped settings persist across requests in a pooled connection; always use transaction-scoped (`true`).
 
-84. ALWAYS namespace every shared cache (Redis, Memcached) key with `tenant_id` and `user_id` — a cache miss that falls through to the DB is safe; a cache hit that returns another tenant's data is a breach.
+96. ALWAYS namespace every shared cache (Redis, Memcached) key with `tenant_id` and `user_id` — a cache miss that falls through to the DB is safe; a cache hit that returns another tenant's data is a breach.
 
-85. NEVER cache data under a key derived from user-supplied input alone — always include server-side identifiers (tenant_id, user_id) to prevent cross-tenant cache poisoning.
+97. NEVER cache data under a key derived from user-supplied input alone — always include server-side identifiers (tenant_id, user_id) to prevent cross-tenant cache poisoning.
 
 ---
 
 ## DoS Protection
 
-86. ALWAYS set a maximum request body size and enforce a per-request timeout in middleware — check `Content-Length` before buffering to reject oversized requests; wrap each request handler in `asyncio.wait_for(call_next(request), timeout=30.0)` so slow DB queries or external calls cannot hold a connection open indefinitely.
+98. ALWAYS set a maximum request body size and enforce a per-request timeout in middleware — check `Content-Length` before buffering to reject oversized requests; wrap each request handler in an async timeout so slow DB queries or external calls cannot hold a connection open indefinitely.
 
-87. NEVER run Uvicorn directly in production without a reverse proxy — nginx or Caddy handles TLS termination, Slowloris defense, and connection timeouts; always configure `--timeout-keep-alive`, `--limit-concurrency`, and `--backlog` on Uvicorn, and set `client_header_timeout`, `client_body_timeout`, and `send_timeout` in the reverse proxy.
+99. NEVER run your application server directly in production without a reverse proxy — nginx or Caddy handles TLS termination, Slowloris defense, and connection timeouts; configure keep-alive and concurrency limits at both layers.
 
-88. ALWAYS set `client_header_timeout`, `client_body_timeout`, and `send_timeout` in nginx — these values prevent Slowloris attacks by closing connections that do not complete their HTTP exchange within the time limits.
+100. ALWAYS set `client_header_timeout`, `client_body_timeout`, and `send_timeout` in nginx — these values prevent Slowloris attacks by closing connections that do not complete their HTTP exchange within the time limits.
+
+---
+
+## Authentication Edge Cases
+
+101. ALWAYS generate password reset tokens with `secrets.token_urlsafe(32)`, set expiry to ≤15 minutes, invalidate the token on first use (single-use), and compare with `hmac.compare_digest()` — NEVER reuse the same token if the user requests a second reset; invalidate the prior token before issuing a new one.
+
+102. ALWAYS return identical response bodies and HTTP status codes for "user not found" vs "wrong password" on login endpoints — different messages or timing reveals valid usernames to attackers. Perform the same computational work (e.g., a bcrypt dummy hash) regardless of whether the account exists.
+
+103. NEVER return `404` for "email not registered" on password reset endpoints — always return a generic "if this email exists, you'll receive a link" message to prevent account enumeration.
+
+104. NEVER issue a full session token until ALL authentication factors are verified — use a short-lived, capability-limited "pending MFA" token between credential verification and OTP verification, and exchange it for a full session only on OTP success; pre-issuing a full session before 2FA verification allows bypassing the second factor entirely.
+
+105. ALWAYS use `SameSite=Strict` for session cookies on APIs serving a decoupled SPA on a different origin — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.

@@ -35,11 +35,14 @@ paths: ["*.py", "app/**/*.py", "main.py"]
    - `"end_turn"` → read `message.content[0].text`
    - `"tool_use"` → handle tool calls, send results back, continue loop
    - `"max_tokens"` → response truncated — increase `max_tokens` or reduce input
+   - `"model_context_window_exceeded"` → input too large — truncate and retry
+7. `stop_details` is now a structured object on the response alongside `stop_reason` — same info, richer format
 7. Log `usage.input_tokens` and `usage.output_tokens` on EVERY call — needed for cost tracking
-8. NEVER put sensitive data in messages — conversation history is logged
-9. Use `claude-sonnet-4-6` as default model — balance of speed and quality
-   Use `claude-haiku-4-5` for high-volume utility calls (commit messages, summaries)
-   Use `claude-opus-4-6` for complex reasoning only
+9. NEVER put sensitive data in messages — conversation history is logged
+10. Use `claude-sonnet-4-6` as default model — balance of speed and quality
+    Use `claude-haiku-4-5-20251001` for high-volume utility calls (commit messages, summaries)
+    Use `claude-opus-4-6` for complex reasoning only
+    NEVER call `claude-3-haiku-20240307` — retired April 19, 2026
 
 ## Tool Use Loop
 
@@ -105,16 +108,38 @@ paths: ["*.py", "app/**/*.py", "main.py"]
     ```
 24. Cache static tool definitions — they don't change between calls
 25. Cache RAG context when the same documents are used across multiple turns
-26. Cache TTL is 5 minutes — if same content called within 5 min, cache hit (~90% cost reduction)
+26. Cache TTL is **1 hour** (GA since Aug 2025) — cache hit within 1 hour = ~90% cost reduction
 27. Minimum 1024 tokens required for caching — shorter content is not cached
 28. Check `usage.cache_read_input_tokens > 0` to verify cache hit — log cache miss rate
+29. **Automatic caching mode** — set `cache_control` once on the request body; system auto-advances the cache point as conversation grows. Use when you don't want to manually manage breakpoints:
+    ```python
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        cache_control={"type": "ephemeral"},  # on request body, not content block
+        system="...",
+        messages=messages
+    )
+    ```
 
 ## Structured Output
 
-29. Use `client.messages.parse(output_format=MyModel)` when response shape is known
-30. Always use `strict=True` on Pydantic models validating LLM output — see `pydantic-patterns.md`
-31. NEVER trust unvalidated LLM output — always parse through Pydantic before saving to DB
-32. On `ValidationError`: retry ONCE with error appended to prompt — do NOT retry blindly
+30. **Breaking change (Jan 2026):** `output_format=` parameter renamed to `output_config=`:
+    ```python
+    # OLD (pre-Jan 2026, broken on SDK ≥ 0.75):
+    result = client.messages.parse(output_format=MyModel, ...)
+
+    # NEW (current):
+    result = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        output_config={"format": {"type": "json_object", "schema": MyModel.model_json_schema()}},
+        messages=[...]
+    )
+    ```
+31. Always use `strict=True` on Pydantic models validating LLM output — see `pydantic-patterns.md`
+32. NEVER trust unvalidated LLM output — always parse through Pydantic before saving to DB
+33. On `ValidationError`: retry ONCE with error appended to prompt — do NOT retry blindly
 
 ## Error Hierarchy
 
@@ -133,36 +158,41 @@ paths: ["*.py", "app/**/*.py", "main.py"]
 
 ## Context Window Management
 
-37. Context window limits by model:
-    - `claude-sonnet-4-6`: 200k tokens input
-    - `claude-opus-4-6`: 200k tokens input
-    - `claude-haiku-4-5`: 200k tokens input
-38. Truncate MIDDLE of conversation first — preserve system + first + last messages
-39. For coding agents: cap codebase context at 50k tokens — use RAG to select relevant files
-40. NEVER send full file contents for files >500 lines — chunk and select relevant sections
+38. Context window limits by model (GA, no beta header, standard pricing):
+    - `claude-sonnet-4-6`: **1M tokens** input, 64k output
+    - `claude-opus-4-6`: **1M tokens** input, 128k output
+    - `claude-haiku-4-5-20251001`: 200k tokens input, 64k output
+39. Handle `stop_reason == "model_context_window_exceeded"` — input too large, truncate and retry
+40. Truncate MIDDLE of conversation first — preserve system + first + last messages
+41. For coding agents: cap codebase context at 50k tokens even with 1M window — RAG selects relevant files, cost scales with context size
+42. NEVER send full file contents for files >500 lines — chunk and select relevant sections
 
 ## Extended Thinking
 
-41. Enable extended thinking for complex reasoning tasks (math, multi-step logic, hard code review):
+43. Enable extended thinking for complex reasoning tasks (math, multi-step logic, hard code review):
     ```python
+    # Sonnet 4.6 — manual budget_tokens (still supported)
     response = await client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=16000,
         thinking={"type": "enabled", "budget_tokens": 10000},
         messages=[{"role": "user", "content": "Solve..."}]
     )
-    # thinking blocks come BEFORE text blocks in response.content
-    for block in response.content:
-        if block.type == "thinking":
-            # internal reasoning — do NOT send to users
-            pass
-        elif block.type == "text":
-            print(block.text)
+
+    # Opus 4.6 — use effort parameter (budget_tokens deprecated on Opus 4.6)
+    response = await client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=16000,
+        thinking={"type": "adaptive"},  # Opus 4.6 default — adaptive reasoning depth
+        effort="high",                   # "low" | "medium" | "high"
+        messages=[{"role": "user", "content": "Solve..."}]
+    )
     ```
-42. `budget_tokens` must be < `max_tokens` — extended thinking uses tokens from the max_tokens budget
-43. Thinking blocks MUST be included when you pass prior assistant turns back — strip them to save tokens
-44. NEVER display thinking blocks to end users — they are internal reasoning artifacts
-45. Use extended thinking ONLY when needed — it costs more tokens and is slower
+44. `budget_tokens` must be < `max_tokens` — extended thinking uses tokens from the max_tokens budget
+45. Suppress thinking blocks from response (Mar 2026): `thinking={"type": "enabled", "budget_tokens": N, "display": "omitted"}` — faster streaming, same billing, thinking preserved for signatures
+46. Thinking blocks MUST be included when you pass prior assistant turns back (for multi-turn) — strip to save tokens with `display: "omitted"`
+47. NEVER display thinking blocks to end users — they are internal reasoning artifacts
+48. Use extended thinking ONLY when needed — it costs more tokens and is slower
 
 ## Vision (Image Input)
 
@@ -234,11 +264,27 @@ paths: ["*.py", "app/**/*.py", "main.py"]
 55. Use Files API for: large context docs shared across many requests, uploaded PDFs, static reference material
 56. NEVER store sensitive user data via Files API — files persist server-side
 
+## Server-Side Tools (GA — no beta headers required)
+
+57. Anthropic provides built-in tools you can enable without implementing them yourself:
+    ```python
+    tools = [
+        {"type": "web_search_20250305", "name": "web_search"},   # live web search
+        {"type": "web_fetch_20250124", "name": "web_fetch"},     # fetch URL content
+        {"type": "code_execution_20250522", "name": "code_execution"},  # Python execution sandbox
+        {"type": "memory_tool_20250618", "name": "memory_tool"},  # cross-conversation memory
+    ]
+    ```
+58. Server-side tools are GA as of Feb 17, 2026 — no `anthropic-beta` headers needed
+59. Code execution runs in Anthropic's sandbox — safe for executing LLM-generated code
+60. When code execution and web_fetch are used together, code execution incurs no extra charge
+61. Use server-side tools when you don't want to build and maintain tool infrastructure yourself
+
 ## Coding Agent Specific
 
-57. Agent runs tool loop until `stop_reason == "end_turn"` — no fixed step count
-58. Always cap with `max_iterations` guard — NEVER let agent loop without limit
-59. Log every tool call: tool name, input, output, duration — full audit trail
-60. Sandbox isolation is mandatory for code execution — NEVER run agent-generated code on host
-61. Commit message generation: use `claude-haiku-4-5` (cheap, fast, good enough)
-62. PR body generation: use `claude-sonnet-4-6` (needs quality reasoning about changes)
+62. Agent runs tool loop until `stop_reason == "end_turn"` — no fixed step count
+63. Always cap with `max_iterations` guard — NEVER let agent loop without limit
+64. Log every tool call: tool name, input, output, duration — full audit trail
+65. Sandbox isolation is mandatory for code execution — use Anthropic's code_execution tool OR containerize
+66. Commit message generation: use `claude-haiku-4-5-20251001` (cheap, fast, good enough)
+67. PR body generation: use `claude-sonnet-4-6` (needs quality reasoning about changes)

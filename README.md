@@ -62,6 +62,7 @@ A new version is committed after every learning session or rule update.
 | v0.1.0 | Initial — L0–L8 rules + study notes |
 | v0.2.0 | L9 — Anthropic SDK rules + study notes |
 | v0.2.1 | L9 extended — Batches API, Files API, Extended Thinking, Vision |
+| v0.2.2 | L9 corrections — 1M context, 1-hour cache TTL, output_config, effort, server-side tools |
 
 ---
 

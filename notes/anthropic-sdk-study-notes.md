@@ -57,8 +57,11 @@ message = await client.messages.create(
 | `"end_turn"` | Claude finished | Read `message.content[0].text` |
 | `"tool_use"` | Claude wants a tool | Execute tool, send result back |
 | `"max_tokens"` | Response cut off | Increase `max_tokens` or shorten input |
+| `"model_context_window_exceeded"` | Input too large | Truncate messages and retry |
 
 Always check `stop_reason` before reading content. Assuming it's always `end_turn` is the #1 bug.
+
+The response also includes `stop_details` — a structured version of the same info, useful for logging.
 
 ---
 
@@ -205,10 +208,12 @@ if response.usage.cache_read_input_tokens > 0:
 
 **The rules:**
 - Minimum 1024 tokens to cache (shorter = not worth caching)
-- 5 minute TTL — same content within 5 min = cache hit
+- **1 hour TTL** (GA since Aug 2025) — same content within 1 hour = cache hit
 - ~90% cost reduction on cache hit
 - Cache the system prompt (same every request) ✓
 - Don't cache user messages (different every request) ✗
+
+**Automatic caching mode (new, Feb 2026):** Instead of marking individual blocks, put `cache_control` on the whole request and the system manages cache point advancement as the conversation grows. Simpler for multi-turn agents.
 
 **For coding agents:** Cache the codebase. It's the same for all requests in a session.
 
@@ -227,17 +232,20 @@ class CodeReview(BaseModel):
     issues: list[str]
     suggested_fix: str | None
 
-result = client.messages.parse(
+response = await client.messages.create(
     model="claude-sonnet-4-6",
     max_tokens=1024,
-    output_format=CodeReview,
+    output_config={"format": {"type": "json_object", "schema": CodeReview.model_json_schema()}},
     messages=[{"role": "user", "content": f"Review this code:\n{code}"}]
 )
 
-review = result.parsed_output
+import json
+review = CodeReview.model_validate_json(response.content[0].text)
 if review.has_bugs and review.severity == "critical":
     alert_team()
 ```
+
+**Breaking change note:** The old `output_format=` parameter was renamed to `output_config=` in Jan 2026. If you see old code using `output_format`, update it.
 
 Claude is forced to return exactly this shape. No parsing, no guessing.
 
@@ -284,6 +292,11 @@ async def call_claude(client, messages):
 
 **Analogy:** A whiteboard. It has finite space. When it fills up, you erase the oldest notes — but you always keep the current task and the most recent work visible.
 
+**Context windows (updated 2026):**
+- `claude-sonnet-4-6` → **1M tokens** input (GA, standard pricing)
+- `claude-opus-4-6` → **1M tokens** input (GA, standard pricing)
+- `claude-haiku-4-5-20251001` → 200k tokens input
+
 ```python
 def truncate_middle(messages: list, keep_first: int = 1) -> list:
     """
@@ -301,6 +314,7 @@ def truncate_middle(messages: list, keep_first: int = 1) -> list:
 - First user message = the original task (never remove)
 - Middle messages = tool calls and results from earlier steps (remove these first)
 - Last user message = current step (never remove)
+- Even with 1M context, cap codebase at 50k — cost scales linearly with tokens sent
 
 ---
 
@@ -309,11 +323,21 @@ def truncate_middle(messages: list, keep_first: int = 1) -> list:
 **Analogy:** A chess player who works through moves in their head before speaking. The "thinking" is internal — you only hear their conclusion. Extended thinking gives Claude a scratchpad to reason step-by-step before answering.
 
 ```python
+# Sonnet 4.6 — manual budget (still supported)
 response = await client.messages.create(
     model="claude-sonnet-4-6",
     max_tokens=16000,
     thinking={"type": "enabled", "budget_tokens": 10000},
     messages=[{"role": "user", "content": "Why does this async bug only appear under load?"}]
+)
+
+# Opus 4.6 — effort parameter (budget_tokens deprecated on Opus 4.6)
+response = await client.messages.create(
+    model="claude-opus-4-6",
+    max_tokens=16000,
+    thinking={"type": "adaptive"},
+    effort="high",   # "low" | "medium" | "high"
+    messages=[{"role": "user", "content": "Design the architecture for this agent system"}]
 )
 
 for block in response.content:
@@ -322,6 +346,8 @@ for block in response.content:
     elif block.type == "text":
         print(block.text)   # the actual answer
 ```
+
+**New: suppress thinking blocks** (Mar 2026) — set `"display": "omitted"` to get faster streaming without thinking content. The signature is still preserved so multi-turn works. Use this in production to reduce latency.
 
 **When to use:**
 - Complex debugging (why does this fail under race conditions?)
@@ -424,22 +450,56 @@ await client.beta.files.delete(file.id)
 
 ---
 
-## How all 13 concepts connect in the coding agent
+## Concept 14 — Server-Side Tools (GA)
+
+**Analogy:** Pre-built tools at a hardware store vs. making your own tools. You could build a drill yourself, but why? Anthropic gives you pre-built tools you just enable.
+
+```python
+# No need to implement these — Anthropic runs them in their infrastructure
+tools = [
+    {"type": "web_search_20250305", "name": "web_search"},
+    {"type": "web_fetch_20250124", "name": "web_fetch"},
+    {"type": "code_execution_20250522", "name": "code_execution"},
+    {"type": "memory_tool_20250618", "name": "memory_tool"},
+]
+
+response = await client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    tools=tools,
+    messages=[{"role": "user", "content": "Search for the latest Python async best practices"}]
+)
+# Claude calls web_search automatically — you get the result, no server needed
+```
+
+**GA since Feb 17, 2026** — no beta headers required anymore.
+
+**When to use over your own tools:**
+- You want web search/fetch without running your own servers
+- You need sandboxed code execution (safer than your own sandbox)
+- You want cross-conversation memory without building a memory DB
+
+**For coding agents:** The `code_execution` tool is the easiest way to safely run LLM-generated code.
+
+---
+
+## How all 14 concepts connect in the coding agent
 
 ```
-1. Client init      → AsyncAnthropic created once at startup
-2. Messages API     → send task + conversation history
-3. Tool use loop    → read files, write files, run commands
-4. Streaming        → show progress to user in real-time
-5. Token counting   → check codebase fits in context before sending
-6. Prompt caching   → cache codebase content (same across turns)
-7. Structured out   → get structured result (files changed, PR title)
-8. Error handling   → retry on rate limits, fail fast on bad requests
-9. Context mgmt     → truncate old tool results when context fills up
-10. Ext. thinking   → hard debugging and architecture decisions
-11. Vision          → read UI screenshots, error dialogs
-12. Batches API     → nightly summaries, bulk analysis (not real-time)
-13. Files API       → upload codebase once, reference across all turns
+1. Client init        → AsyncAnthropic created once at startup
+2. Messages API       → send task + conversation history; always check stop_reason
+3. Tool use loop      → read files, write files, run commands — the agent loop
+4. Streaming          → show progress to user in real-time
+5. Token counting     → check codebase fits in context before sending
+6. Prompt caching     → 1-hour TTL; cache codebase content (same across turns)
+7. Structured output  → output_config= for Pydantic-shaped responses
+8. Error handling     → retry on rate limits, fail fast on bad requests
+9. Context mgmt       → 1M window; truncate old tool results when nearing limit
+10. Ext. thinking     → hard debugging and architecture decisions
+11. Vision            → read UI screenshots, error dialogs
+12. Batches API       → 50% cheaper nightly summaries, bulk analysis
+13. Files API         → upload codebase once, reference across all turns
+14. Server-side tools → GA: web search, code execution, memory — no infra needed
 ```
 
 This is the complete Anthropic SDK layer of the coding agent.

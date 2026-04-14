@@ -69,6 +69,7 @@ A new version is committed after every learning session or rule update.
 | v0.3.1 | L9 final — tool_choice, PDF inputs, prefilling, Agent Skills, Computer Use (25 concepts, 137 rules) |
 | v0.3.2 | L9 fix — sequential renumber 1–141 (duplicate rule numbers 7, 10, 33, 46–48 corrected) |
 | v0.4.0 | L10 — LangGraph (StateGraph, reducers, checkpointing, HITL, streaming, Send, Command, RetryPolicy) |
+| v0.4.7 | L10 complete — 161 rules: full control design principles, superstep isolation, streaming+HITL, durable agents, reflexion, tool routing, determinism |
 
 ---
 

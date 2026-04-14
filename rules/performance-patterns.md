@@ -287,3 +287,99 @@ paths: ["**"]
 109. ALWAYS load test with realistic data distribution — a load test with a single cached user_id is not representative of real traffic.
 
 110. NEVER claim a query optimization is an improvement without running EXPLAIN on the exact production query with production data volume — optimizer behavior changes with data size.
+
+---
+
+## PostgreSQL Profiling — Setup and Advanced Nodes
+
+111. ALWAYS enable `pg_stat_statements` by adding it to `shared_preload_libraries` in `postgresql.conf` and running `CREATE EXTENSION pg_stat_statements` after restart — set `pg_stat_statements.max = 10000` and `pg_stat_statements.track = all`. Without these settings the extension collects no data.
+
+112. ALWAYS set `log_min_duration_statement = 1000` in `postgresql.conf` as a baseline slow query threshold — lower to 100ms in staging; never set to 0 in production (logs every query).
+
+113. USE `nplusone` or a SQLAlchemy `after_cursor_execute` event listener during development to detect N+1 queries before production — assert `len(captured_queries) <= EXPECTED_MAX` per test.
+
+114. RECOGNIZE `Bitmap Index Scan` + `Bitmap Heap Scan` as the planner combining multiple index conditions via an in-memory bitmap — investigate only when `Rows Removed by Recheck` is high (bitmap was lossy due to low `work_mem`); increase `work_mem` for that session to fix it.
+
+115. RECOGNIZE `Gather`/`Gather Merge` nodes as parallel query execution — if `Workers Launched < Workers Planned`, increase `max_parallel_workers` and `max_parallel_workers_per_gather` in `postgresql.conf`.
+
+116. ALWAYS route read-only queries to a hot standby replica via a separate SQLAlchemy read engine — monitor replication lag with `SELECT extract(epoch FROM (now() - pg_last_xact_replay_timestamp()))` and add a circuit-breaker fallback to the primary if lag exceeds your staleness SLO.
+
+---
+
+## Caching — Redis Advanced Patterns
+
+117. USE Redis `MULTI`/`EXEC` when the correctness of a command batch requires atomicity — pipelines reduce round trips but are not atomic; use `WATCH key` before `MULTI` for optimistic read-modify-write cycles (retry on `nil` return from `EXEC`).
+
+118. ALWAYS use hash tags `{...}` in Redis Cluster key names when a Lua script or `MULTI`/`EXEC` block must operate on multiple keys — `{user:42}:profile` and `{user:42}:sessions` hash to the same slot; keys without a shared hash tag may live on different nodes and raise `CROSSSLOT`.
+
+119. CHOOSE Redis over Memcached whenever you need persistence, pub/sub, sorted sets, streams, lists, Lua scripting, or atomic multi-key operations — choose Memcached only for pure key-value caching at extreme write throughput when none of Redis's data structures are needed.
+
+120. ALWAYS version cache keys when the shape of cached data changes — use a version prefix (`v2:user:42:profile`); old versioned keys expire under their TTL without a cache flush. Never flush an entire cache namespace on deploy — it creates a simultaneous miss storm.
+
+121. ALWAYS add TTL jitter (10–25% random offset) to cache entries populated in bulk — if 10,000 keys expire simultaneously they cause a synchronized miss storm; use `ttl = base_ttl + random.randint(0, base_ttl // 4)`.
+
+122. CHECK `OBJECT ENCODING <key>` in Redis when memory usage is unexpectedly high — a hash exceeding `hash-max-listpack-entries` (default 128) promotes to a full hash table, multiplying memory by 5–10x; tune thresholds in `redis.conf` after benchmarking.
+
+---
+
+## Query Patterns — Pagination and Prepared Statements
+
+123. USE prepared statements for hot query paths in asyncpg — `await conn.prepare(sql)` compiles the plan once; subsequent executions skip parse and plan phases. asyncpg's built-in `statement_cache_size=100` auto-prepares on first execution.
+
+124. ALWAYS use cursor-based (keyset) pagination instead of `LIMIT N OFFSET M` for tables larger than ~100,000 rows — `OFFSET M` forces reading and discarding M rows; keyset `WHERE (created_at, id) < ($ts, $id)` executes in O(log N) via index regardless of page depth.
+
+125. NEVER use `SELECT COUNT(*) FROM large_table` in a user-facing request path — use `pg_stat_user_tables.n_live_tup` or `SELECT reltuples FROM pg_class` for UI display counts; maintain an explicit counter for business-critical exact counts.
+
+126. ALWAYS create a covering index with `INCLUDE` for frequently paginated queries — `CREATE INDEX ON posts (author_id, created_at DESC) INCLUDE (id, title)` enables Index Only Scan; the query never touches the heap.
+
+127. TREAT any query using `OFFSET` beyond 1,000 rows as a mandatory migration trigger to keyset pagination — OFFSET cost grows linearly; this is fundamental, not a configuration problem.
+
+128. USE `SELECT ... FOR UPDATE SKIP LOCKED` for job queue patterns in PostgreSQL — atomically locks and returns only rows not held by another worker; eliminates the need for a separate queue broker at moderate throughput (<1,000 jobs/second).
+
+---
+
+## LLM Performance — Advanced
+
+129. TUNE async worker concurrency by workload type — I/O-bound async tasks: `--concurrency = 4–8x CPU_COUNT` with async pool; CPU-bound tasks: `--concurrency = CPU_COUNT` with prefork. For Celery set `worker_prefetch_multiplier = 1` for long tasks to prevent queue hoarding.
+
+130. IMPLEMENT LLM streaming in FastAPI using `StreamingResponse` with `media_type="text/event-stream"` and set `X-Accel-Buffering: no` to prevent nginx from buffering the stream — yield each delta chunk immediately without accumulating the full response.
+
+131. IMPLEMENT a sliding window token budget for multi-turn LLM conversations — evict oldest turns when history exceeds 80% of context window, preserving the system prompt and the most recent user+assistant pair; log every eviction event.
+
+132. ALWAYS batch embedding requests to the provider's maximum batch size — OpenAI up to 2,048 inputs, Voyage up to 128; batching eliminates per-request HTTP overhead; use `asyncio.gather` with a `Semaphore` to parallelize batches.
+
+133. ALWAYS implement exponential backoff with jitter on LLM API 429 responses — base 1s, double each retry, add `random.uniform(0, delay * 0.5)` jitter, cap at 60s, stop after 5 attempts. Never retry immediately after a 429.
+
+134. USE structured output (JSON mode or tool-use with explicit schema) for LLM tasks that require parsing — eliminates prose-wrapping tokens, makes output token count predictable, and uses 30–50% fewer output tokens than free-text with "respond in JSON" instructions.
+
+---
+
+## HTTP and Network Performance
+
+135. ALWAYS reuse `httpx.AsyncClient` instances by instantiating them at application startup and injecting via dependency — creating a new client per request opens a new TCP+TLS connection each time, adding 50–200ms per external API call.
+
+136. ALWAYS add `GZipMiddleware` with `minimum_size=1000` — responses under 1KB cost more CPU to compress than bandwidth saved; responses over 1KB typically compress to 20–30% of original size. Do not compress already-compressed formats (JPEG, PNG, binary).
+
+137. SERVE static files via nginx using `sendfile(2)` in all production deployments where nginx is available — use WhiteNoise only on PaaS platforms without reverse proxy configuration. Set `Cache-Control: public, max-age=31536000, immutable` on versioned static assets.
+
+138. ALWAYS project response fields to the minimum set needed by each endpoint — define separate `UserSummary` (list) and `UserDetail` (single-item) schemas; field projection reduces response size by 60–80% on list endpoints.
+
+139. ALWAYS use `selectinload` for one-to-many and `joinedload` for many-to-one (FK) in SQLAlchemy — `joinedload` on one-to-many produces a JOIN that multiplies result rows by child count (cartesian product); `selectinload` issues one extra `WHERE id IN (...)` query with no row inflation.
+
+140. NEVER rely on SQLAlchemy default lazy loading on relationships accessed in API paths — set `lazy="raise_on_sql"` on all relationship definitions to fail loudly during development, then use explicit `options(selectinload(...))` or `options(joinedload(...))` at query time.
+
+---
+
+## Python Memory and Process Tuning
+
+141. USE `tracemalloc.start(25)` + `take_snapshot()` + `statistics("lineno")` to identify memory allocation hotspots by file and line number — compare two snapshots with `snapshot2.compare_to(snapshot1, "lineno")` to find what grew between requests.
+
+142. USE `objgraph.show_growth(limit=10)` after processing N requests to detect reference leaks — use `show_backrefs(obj, max_depth=5)` to trace what holds the reference alive. Run in a local load test harness only; objgraph traverses the entire heap and is very slow.
+
+143. ALWAYS set `worker_class = "uvicorn.workers.UvicornWorker"` when running FastAPI under Gunicorn — the default `sync` worker cannot execute `async def` route handlers correctly; `UvicornWorker` embeds a full uvicorn event loop per Gunicorn worker process.
+
+144. CALCULATE Gunicorn workers as `(2 * CPU_COUNT) + 1` for I/O-bound async applications — verify that `workers * pool_size_per_worker <= db_max_connections * 0.8`.
+
+145. INTERPRET load test results using Little's Law (`L = λ × W`) to identify the saturation point — throughput grows linearly until the server saturates; beyond saturation throughput flattens while P99 grows rapidly. Report capacity as the RPS at which P99 first exceeds your SLO, not peak RPS.
+
+146. DISABLE Python's cyclic GC in Gunicorn workers via `gc.disable()` in a `post_fork` hook ONLY when the application creates no reference cycles — GC pauses add P99 spikes of 5–50ms; re-enable immediately if memory grows without bound after disabling.

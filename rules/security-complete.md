@@ -486,4 +486,70 @@ paths: ["**"]
 
 156. NEVER interpolate user input into XPath expressions — use an XML library's variable binding mechanism (e.g. `lxml`'s `variables` parameter) rather than string concatenation; for SAML assertions, always validate signatures before attribute extraction to prevent SAML wrapping attacks.
 
-157. NEVER interpolate user input into LDAP filter strings — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server. — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.
+157. NEVER interpolate user input into LDAP filter strings — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server.
+
+---
+
+## Multi-Tenancy Edge Cases
+
+158. ALWAYS configure PgBouncer (or equivalent) in transaction-pooling mode (`pool_mode=transaction`) when using PostgreSQL RLS with `set_config` for tenant isolation — session-pooling mode allows a connection used by tenant A to be reused by tenant B before the next `set_config` call; any code path that omits `set_config` (error handlers, health checks, background tasks) inherits the prior tenant's identity.
+
+---
+
+## ReDoS Protection
+
+159. NEVER compile user-supplied strings as regular expressions with `re.compile()` — use the `re2`/`google-re2` library (linear-time, no backtracking) for user-supplied patterns, or wrap `re.compile()` in a subprocess with a hard timeout; catastrophic backtracking on patterns like `(a+)+$` can freeze an event loop thread for minutes.
+
+---
+
+## XXE Prevention
+
+160. NEVER parse XML with `lxml.etree` without an explicitly hardened parser: `lxml.etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)` — the default parser resolves local file entities (XXE file read) and network entities (SSRF). For stdlib `xml.etree.ElementTree`, use the `defusedxml` drop-in replacement which disables entity expansion and DTD processing.
+
+---
+
+## HTTP Parameter Pollution
+
+161. ALWAYS reject requests that supply the same security-sensitive query parameter more than once — check `len(request.query_params.getlist("param")) > 1` and return 422; duplicate parameters are used to bypass WAFs that inspect only the first or last occurrence while your app reads the other. Apply this to any parameter influencing access control, filtering, or pricing.
+
+---
+
+## DAST in CI
+
+162. ALWAYS run a DAST scan (OWASP ZAP `zap-api-scan.py` or equivalent) against a live staging deployment as a blocking nightly CI job — SAST cannot detect runtime auth bypass, IDOR, or session fixation; configure ZAP with your OpenAPI schema so it exercises every documented endpoint; store scan reports as CI artifacts for audit trail.
+
+---
+
+## Incident Response — JWT Revocation
+
+163. ALWAYS implement a `jti` revocation path before going to production: store a `jti` claim generated with `secrets.token_urlsafe(16)` in every issued JWT, maintain a Redis sorted set of revoked JTIs keyed by expiry timestamp, and check membership on every authenticated request; use `ZREMRANGEBYSCORE` on expiry to keep the set bounded.
+
+164. ALWAYS document and test a kill-switch runbook: rotating the signing key invalidates ALL active tokens within one access token TTL; test this in staging before production launch. Refresh tokens MUST be stored server-side (database) to enable per-user revocation without key rotation.
+
+---
+
+## Browser Security — Cross-Origin Isolation
+
+165. ALWAYS set `Cross-Origin-Opener-Policy: same-origin` on all document responses — severs the opener relationship between your pages and cross-origin popups, blocking Spectre-class side-channel leaks.
+
+166. ALWAYS set `Cross-Origin-Resource-Policy: same-origin` on API responses — prevents cross-origin reads of sensitive JSON by other origins.
+
+167. ALWAYS add a `integrity="sha384-..."` Subresource Integrity hash and `crossorigin="anonymous"` to every `<script>` or `<link>` tag loading from a CDN — SRI blocks execution if the CDN-hosted file is modified by a supply-chain attacker; generate hashes with `openssl dgst -sha384 -binary file.js | base64`.
+
+---
+
+## Secrets in Environment Variables
+
+168. NEVER store secrets in `.env` files on persistent disk in production, in CI environment variable UIs as plaintext, in container image layers (`ENV` in Dockerfile), or in ECS task definition console — these are logged, cached, and visible in `docker inspect`. Environment variables are acceptable ONLY when injected at runtime by a secrets manager (Vault Agent Injector, AWS Secrets Manager CSI, Doppler operator) that writes them ephemerally and never to disk.
+
+---
+
+## Cryptographic Nonces
+
+169. ALWAYS generate CSP nonces, CSRF tokens, WebSocket handshake tokens, and anti-replay nonces with `secrets.token_urlsafe(16)` (minimum 128 bits) — NEVER use `uuid.uuid4()` for security nonces; CSP nonces MUST be unique per HTTP response (not per session) and injected into both the `Content-Security-Policy` header and the corresponding `<script nonce="...">` tag simultaneously; a reused nonce defeats the CSP nonce mechanism.
+
+---
+
+## API Gateway vs Application Security Split
+
+170. NEVER trust identity headers injected by an API gateway (`X-User-ID`, `X-Tenant-ID`, `X-Authenticated-User`) without verifying they originated from your own trusted gateway — the application MUST re-verify the JWT on every request regardless of gateway validation, OR MUST enforce network policy (firewall / Kubernetes NetworkPolicy) that allows traffic to the app port ONLY from the gateway's IP range; "gateway does auth, app trusts the header" without network-layer enforcement allows any internal-network attacker to forge identity. — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server. — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.

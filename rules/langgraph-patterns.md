@@ -1058,3 +1058,95 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
      result3 = await graph.ainvoke(Command(resume="confirmed"), config)  # completes
      ```
 175. When polling a durable agent, check `snapshot.next` — if it contains a node that calls `interrupt()`, the graph is waiting for human input, not computing; surface this distinction to the user
+
+## ToolNode with Custom State Key
+
+176. `ToolNode` reads tool calls from `state["messages"]` by default — if your state uses a different key for the message list, pass `messages_key`:
+     ```python
+     class MyState(TypedDict):
+         chat_history: Annotated[list, add_messages]  # NOT "messages"
+         user_id: str
+
+     # Tell ToolNode which key holds the messages
+     tool_node = ToolNode(tools, messages_key="chat_history")
+     ```
+177. If `ToolNode` silently produces no output and the agent loops without executing tools, the first thing to check is whether `messages_key` matches your state's actual message list key
+
+## create_react_agent Customization
+
+178. Customize the system prompt for a prebuilt `create_react_agent` with `state_modifier` — it's a function or `SystemMessage` applied before each LLM call:
+     ```python
+     from langgraph.prebuilt import create_react_agent
+     from langchain_core.messages import SystemMessage
+
+     # Static system message
+     agent = create_react_agent(
+         model,
+         tools=tools,
+         state_modifier=SystemMessage("You are a helpful coding assistant. Be concise."),
+     )
+
+     # Dynamic — receives state, returns modified message list
+     def add_context(state: AgentState) -> list:
+         system = SystemMessage(f"User tier: {state.get('tier', 'free')}. Be helpful.")
+         return [system] + state["messages"]
+
+     agent = create_react_agent(model, tools=tools, state_modifier=add_context)
+     ```
+179. Use `response_format` on `create_react_agent` to make the prebuilt agent return structured output as its final response — the agent still uses tools freely but its last message is validated against the schema:
+     ```python
+     from pydantic import BaseModel
+
+     class ResearchResult(BaseModel):
+         summary: str
+         sources: list[str]
+         confidence: float
+
+     agent = create_react_agent(model, tools=tools, response_format=ResearchResult)
+     result = agent.invoke({"messages": [HumanMessage("Research quantum computing")]})
+     # result["structured_response"] is a ResearchResult instance
+     ```
+180. `state_modifier` replaces the system prompt on every call — do NOT append it to `state["messages"]` manually or it will double-inject; let `create_react_agent` handle injection
+
+## with_structured_output() for Data Extraction in Nodes
+
+181. Use `model.with_structured_output(Schema)` inside any node to extract typed structured data from the LLM — not only for routing, but as a general extraction primitive:
+     ```python
+     from pydantic import BaseModel
+     from langchain_anthropic import ChatAnthropic
+
+     class ExtractedEntities(BaseModel):
+         people: list[str]
+         organizations: list[str]
+         locations: list[str]
+
+     model = ChatAnthropic(model="claude-sonnet-4-6")
+     extractor = model.with_structured_output(ExtractedEntities)
+
+     async def extract_entities(state: State) -> dict:
+         result: ExtractedEntities = await extractor.ainvoke(
+             f"Extract entities from: {state['text']}"
+         )
+         return {"entities": result.model_dump()}
+     ```
+182. `model.with_structured_output(Schema)` returns an instance of `Schema` directly (not a `BaseMessage`) — you cannot add it to `state["messages"]` directly; extract the fields you need and return them as state keys
+183. Prefer `with_structured_output` over manually parsing LLM text output — it uses tool-use or JSON mode under the hood and never fails on phrasing; manual string parsing fails unpredictably
+
+## Pydantic BaseModel as State Type
+
+184. LangGraph v1.0 accepts a `pydantic.BaseModel` as the state type instead of `TypedDict` — this adds field validation on every node update:
+     ```python
+     from pydantic import BaseModel, Field
+     from typing import Annotated
+     from langgraph.graph.message import add_messages
+
+     class AgentState(BaseModel):
+         messages: Annotated[list, add_messages] = Field(default_factory=list)
+         step_count: int = 0
+         status: str = "pending"
+
+     builder = StateGraph(AgentState)
+     # Nodes return dicts as normal — LangGraph constructs/updates the model
+     ```
+185. Pydantic state gives you: field defaults, type coercion, and `model_validators` — use it when you want to enforce invariants on state transitions (e.g., `step_count` must never be negative)
+186. NEVER use `BaseModel` state when you need `Annotated` reducers on complex types — Pydantic's `Field` and LangGraph's `Annotated[..., reducer]` can conflict; test thoroughly or use `TypedDict` for reducer-heavy state

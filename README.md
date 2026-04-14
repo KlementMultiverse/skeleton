@@ -24,6 +24,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `langgraph-patterns.md` | L10 | StateGraph, reducers, checkpointing, HITL, streaming, Send, Command |
 | `rag-patterns.md` | L11 | Embeddings, pgvector, chunking, hybrid search, reranking, RAGAS |
 | `security-complete.md` | L12 | OWASP API Top 10, JWT attacks, SSRF, CORS, encryption, RLS, DoS |
+| `performance-patterns.md` | L13 | Profiling, index design, caching, LLM cost, ORJSONResponse, uvloop |
 
 ---
 
@@ -40,6 +41,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `langgraph-study-notes.md` | StateGraph, reducers, checkpointing, HITL, streaming, Send, Command |
 | `rag-pgvector-study-notes.md` | Embeddings, chunking, hybrid search, reranking, RAGAS evaluation |
 | `security-study-notes.md` | OWASP API Top 10, JWT algorithm confusion, SSRF, encryption, audit logging |
+| `performance-study-notes.md` | Profiling, query optimization, caching strategies, LLM cost, measurement |
 
 ---
 
@@ -79,6 +81,8 @@ A new version is committed after every learning session or rule update.
 | v0.6.1 | L11 fix — ef_construction 64→200, halfvec storage, HyDE, async embedding clients, ef_search pool fix |
 | v0.7.0 | L0-L8 gap fill — webhooks, cache-control, ExceptionGroup, ContextVar, SecretStr, AliasGenerator, .returning(), jwt aud, bulk ops, Sentry, factory_boy, respx |
 | v0.8.0 | L12 — Security OWASP (BOLA, mass assignment, JWT alg confusion, SSRF DNS, CORS, field encryption, RLS, DoS, 85 rules) |
+| v0.8.6 | L12 final — 188 rules after 6 iterations (kid/jku JWT, BFLA, Argon2id, WebSocket, SSTI, container, HTTP smuggling, deserialization, STRIDE) |
+| v0.9.0 | L13 — Performance (profiling, index design, caching, LLM cost/caching, ORJSONResponse, uvloop, 110 rules) |
 
 ---
 
@@ -90,6 +94,7 @@ Rules files will be added as each level is completed:
 - [x] L10 — LangGraph (stateful agents, checkpointing, HITL)
 - [x] L11 — RAG + pgvector (embeddings, hybrid search, reranking)
 - [x] L12 — Security deep dive (OWASP API Top 10)
+- [x] L13 — Performance (query optimization, caching, LLM cost)
 - [ ] L13 — Performance (query optimization, caching)
 - [ ] L14 — LLM Observability (Langfuse, tracing, evals)
 - [ ] L15 — Production deployment (Docker, health checks, migrations)

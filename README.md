@@ -28,6 +28,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `observability-patterns.md` | L14 | Langfuse, LangSmith, cost attribution, RAGAS, LLM-as-judge, OTel |
 | `deployment-patterns.md` | L15 | Docker multi-stage, health checks, Gunicorn, migrations, CI/CD |
 | `senior-patterns.md` | L16 | ADRs, system design, technical debt, LLM cost modeling, DORA metrics |
+| `voice-patterns.md` | L17 | Latency budget, audio formats, Ultravox, VAD, telephony, PCI-DSS, GDPR, SLOs |
 
 ---
 
@@ -48,6 +49,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `llm-observability-study-notes.md` | Langfuse tracing, cost attribution, RAGAS evals, LLM-as-judge, OTel |
 | `production-deployment-study-notes.md` | Docker, health checks, Gunicorn, zero-downtime migrations, CI/CD |
 | `senior-patterns-study-notes.md` | ADRs, system design, tech debt, LLM cost, code review, event-driven, DORA |
+| `voice-study-notes.md` | Latency budget, audio formats, Ultravox, VAD/barge-in, telephony, production architecture |
 
 ---
 
@@ -93,6 +95,7 @@ A new version is committed after every learning session or rule update.
 | v1.0.0 | L14 — LLM Observability (Langfuse, LangSmith, cost attribution, RAGAS, LLM-as-judge, OTel, 135 rules) |
 | v1.1.0 | L15 — Production Deployment (Docker multi-stage, health checks, Gunicorn, zero-downtime migrations, CI/CD, 130 rules) |
 | v1.2.0 | L16 — Senior Patterns (ADRs, system design, tech debt, LLM cost, DORA, chaos engineering, 224 rules) |
+| v1.3.0 | L17 — Real-Time Voice (latency budget, Ultravox, VAD, telephony, PCI-DSS, GDPR, SLOs, 199 rules) |
 
 ---
 
@@ -108,3 +111,4 @@ Rules files will be added as each level is completed:
 - [x] L14 — LLM Observability (Langfuse, tracing, evals)
 - [x] L15 — Production deployment (Docker, health checks, migrations)
 - [x] L16 — Senior patterns (ADRs, system design, cost modeling)
+- [x] L17 — Real-time voice (Ultravox, WebRTC, latency budgets, telephony)

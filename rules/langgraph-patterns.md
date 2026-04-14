@@ -972,3 +972,89 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
 159. Use `temperature=0` on all LLM calls inside routing/classification nodes — routing decisions must be deterministic; non-zero temperature introduces random branching
 160. Use structured output (`model.with_structured_output(Schema)`) for all routing nodes — free text routing ("go to node_a") fails on slight phrasing variations; typed output (`Literal["node_a", "node_b"]`) never fails
 161. Document every conditional edge with a comment explaining the exact routing logic — conditional edges are the most common source of agent behavior bugs; make intent explicit
+
+## add_messages Update-by-ID Semantics
+
+162. `add_messages` does NOT always append — if you return a message with an **existing ID**, it **replaces** that message in place instead of appending; this is how streaming chunk accumulation works internally and how you can correct a previous message:
+     ```python
+     # First write — appends new message with id="msg-1"
+     return {"messages": [AIMessage(content="Hello", id="msg-1")]}
+
+     # Second write with same id — UPDATES, does not append
+     return {"messages": [AIMessage(content="Hello world", id="msg-1")]}
+     # State now has one message, not two
+     ```
+163. This update-by-ID behavior is distinct from `RemoveMessage` — use update-by-ID to correct/amend a message, `RemoveMessage` to delete it entirely
+164. NEVER rely on `add_messages` dedup to deduplicate messages from different sources — it deduplicates by `id`, not by content; messages with different ids but identical content both persist
+
+## StateSnapshot Complete Field Reference
+
+165. A `StateSnapshot` from `graph.get_state(config)` has these fields — know all of them for debugging and HITL:
+     ```python
+     snapshot = graph.get_state(config)
+
+     snapshot.values          # dict — current state values
+     snapshot.next            # tuple[str, ...] — which nodes run next (empty if done)
+     snapshot.config          # dict — config including thread_id and checkpoint_id
+     snapshot.metadata        # dict — {"step": 5, "source": "loop", "writes": {...}}
+     snapshot.created_at      # ISO timestamp string of when this checkpoint was saved
+     snapshot.parent_config   # config of the previous checkpoint (for traversal)
+     ```
+166. `snapshot.next` is an **empty tuple** when the graph has finished — check `not snapshot.next` to detect completion when polling a durable agent
+
+## Command goto as List (Parallel Fan-Out)
+
+167. `Command(goto=[...])` with a **list** of node names dispatches to multiple nodes simultaneously in the next superstep — use for dynamic fan-out when the number of targets is known at decision time:
+     ```python
+     def dispatcher(state: State) -> Command:
+         targets = ["validator", "logger", "notifier"]  # all run in parallel
+         return Command(
+             update={"status": "dispatched"},
+             goto=targets,  # list → all run in next superstep
+         )
+     ```
+168. `Command(goto="single_node")` (string) routes to one node; `Command(goto=["a", "b"])` (list) routes to multiple — both are valid; use `Send` when you need per-node different state, use `Command(goto=[...])` when all targets receive the same state update
+
+## Multi-Tenant thread_id Design
+
+169. Use a compound key for `thread_id` in multi-tenant applications — prevents one user from accessing another user's thread even if they guess a UUID:
+     ```python
+     # Format: "{tenant_id}:{user_id}:{session_id}"
+     thread_id = f"{tenant_id}:{user_id}:{session_uuid}"
+
+     # At read time, always reconstruct from authenticated context — never accept thread_id from client directly
+     config = {"configurable": {"thread_id": f"{request.tenant_id}:{request.user_id}:{session_id}"}}
+     ```
+170. NEVER accept `thread_id` directly from client input in a multi-tenant API — a user could supply another user's `thread_id` and read their conversation; always reconstruct `thread_id` from authenticated identity
+
+## State Schema Migration
+
+171. When you add a new required field to your state `TypedDict`, old checkpoints in PostgreSQL will not have that field — they will fail to deserialize on resume; always add new fields as `Optional` with a default:
+     ```python
+     # BAD — breaks old checkpoints
+     class AgentState(TypedDict):
+         messages: Annotated[list, add_messages]
+         new_field: str   # old checkpoints don't have this → KeyError on resume
+
+     # GOOD — old checkpoints resume safely
+     class AgentState(TypedDict):
+         messages: Annotated[list, add_messages]
+         new_field: str | None  # None for old checkpoints that predate this field
+     ```
+172. Removing a field from state `TypedDict` is safe for resuming old checkpoints — extra keys in the checkpoint are ignored; removing a field only prevents new nodes from writing to it
+173. NEVER rename a state field in a deployed agent with live checkpoints — rename = remove old + add new, so all in-progress threads lose that field's data on resume; add a new field and migrate data in a node instead
+
+## Multiple interrupt() Calls in One Run
+
+174. A single graph invocation can trigger **multiple** `interrupt()` calls if different nodes call `interrupt()` — each interrupt pauses the run and requires a separate `Command(resume=...)` call:
+     ```python
+     # Node 1 calls interrupt() → run pauses
+     result1 = await graph.ainvoke(input, config)  # pauses at node 1's interrupt
+
+     # First resume — continues until next interrupt
+     result2 = await graph.ainvoke(Command(resume="approved"), config)  # pauses at node 2's interrupt
+
+     # Second resume — continues to END
+     result3 = await graph.ainvoke(Command(resume="confirmed"), config)  # completes
+     ```
+175. When polling a durable agent, check `snapshot.next` — if it contains a node that calls `interrupt()`, the graph is waiting for human input, not computing; surface this distinction to the user

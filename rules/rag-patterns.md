@@ -198,3 +198,99 @@ Rules are numbered for traceability. Reference them in code comments and PR revi
         return vec
     ```
 94. NEVER cache document embeddings at query time — document embeddings are computed once at ingest and stored in PostgreSQL; only query embeddings benefit from a Redis cache
+
+## ef_search with Connection Pools
+
+95. `SET hnsw.ef_search = 100` is a **session-level** setting — with a connection pool (asyncpg, psycopg), sessions are reused across requests and the SET command is NOT guaranteed to apply to your query; set it explicitly in the same transaction:
+    ```python
+    async with session.begin():
+        await session.execute(text("SET LOCAL hnsw.ef_search = 100"))
+        results = await session.execute(
+            select(Chunk)
+            .where(Chunk.tenant_id == tenant_id)
+            .order_by(Chunk.embedding.cosine_distance(query_vec))
+            .limit(20)
+        )
+    ```
+    `SET LOCAL` scopes the setting to the current transaction only — safe with connection pools.
+96. NEVER rely on application startup `SET hnsw.ef_search` to persist across requests in a pooled environment — connections are reused; the setting may belong to any prior request's session
+
+## Async Embedding Clients
+
+97. ALWAYS use the async embedding client to avoid blocking the event loop in FastAPI — blocking I/O inside an async route pauses ALL concurrent requests:
+    ```python
+    # Voyage (async client)
+    import voyageai
+    voyage_client = voyageai.AsyncClient(api_key=os.environ["VOYAGE_API_KEY"])
+
+    async def embed_query(text: str) -> list[float]:
+        result = await voyage_client.embed([text], model="voyage-3", input_type="query")
+        return result.embeddings[0]
+
+    # OpenAI (async client)
+    from openai import AsyncOpenAI
+    openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    async def embed_query(text: str) -> list[float]:
+        result = await openai_client.embeddings.create(
+            input=text, model="text-embedding-3-small"
+        )
+        return result.data[0].embedding
+    ```
+98. If using a sync embedding client (e.g., Cohere sync SDK), wrap in `asyncio.to_thread` — NEVER call it directly in an async route:
+    ```python
+    import asyncio
+    result = await asyncio.to_thread(sync_embed_fn, text)
+    ```
+
+## Token Budget Before Context Injection
+
+99. ALWAYS count tokens BEFORE injecting context into Claude — system prompt + conversation history + retrieved chunks + user query must fit in the model context window; truncate chunks if over budget:
+    ```python
+    import tiktoken
+
+    enc = tiktoken.get_encoding("cl100k_base")
+
+    def count_tokens(text: str) -> int:
+        return len(enc.encode(text))
+
+    def build_context_within_budget(
+        chunks: list[Chunk],
+        system_prompt: str,
+        conversation: list[dict],
+        query: str,
+        max_tokens: int = 180_000,   # Claude Sonnet 4.6 context window
+        reserve_for_output: int = 4_000,
+    ) -> list[Chunk]:
+        used = count_tokens(system_prompt) + count_tokens(query) + reserve_for_output
+        for msg in conversation:
+            used += count_tokens(msg["content"])
+
+        selected = []
+        for chunk in chunks:            # chunks already ranked by relevance
+            chunk_tokens = count_tokens(chunk.content)
+            if used + chunk_tokens > max_tokens:
+                break
+            selected.append(chunk)
+            used += chunk_tokens
+        return selected
+    ```
+100. NEVER inject all retrieved chunks unconditionally — always apply token budget trimming; long conversations accumulate history and reduce the space available for context
+
+## Local Cross-Encoder Reranking
+
+101. Use `cross-encoder/ms-marco-MiniLM-L6-v2` (sentence-transformers) as the self-hosted alternative to Cohere Rerank — no API cost, runs on CPU, adequate for most use cases:
+     ```python
+     from sentence_transformers import CrossEncoder
+     import asyncio
+
+     # Load once at startup — not per request
+     cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L6-v2")
+
+     async def rerank_local(query: str, chunks: list[Chunk]) -> list[Chunk]:
+         pairs = [(query, chunk.content) for chunk in chunks]
+         scores = await asyncio.to_thread(cross_encoder.predict, pairs)
+         ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
+         return [chunk for chunk, _ in ranked[:5]]
+     ```
+102. Use Cohere Rerank when: query volume is high (avoids CPU bottleneck), latency SLA is tight, or domain requires multilingual reranking. Use local cross-encoder when: self-hosted is required, cost is a constraint, or query volume is low.

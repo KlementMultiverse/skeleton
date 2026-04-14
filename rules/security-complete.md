@@ -392,4 +392,98 @@ paths: ["**"]
 
 129. ALWAYS generate an SBOM (`syft` or `cyclonedx-bom`) as a CI artifact on every production build — required for EO 14028 compliance and enables rapid triage when a new CVE drops; you can instantly determine if the affected package is in your build without scanning all repos manually.
 
-130. ALWAYS audit DNS CNAMEs for dangling records before enabling HSTS `preload` — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.
+130. ALWAYS audit DNS CNAMEs for dangling records before enabling HSTS `preload` — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone.
+
+---
+
+## Insecure Deserialization
+
+131. NEVER call `pickle.loads()`, `marshal.loads()`, or `yaml.load()` on any data that crossed a trust boundary (network, file upload, user-supplied cache hit) — these execute arbitrary Python code on attacker-controlled input.
+
+132. ALWAYS use `yaml.safe_load()` — never bare `yaml.load()`; the unsafe loader evaluates arbitrary Python constructors.
+
+133. NEVER serialize Python objects to Redis or any shared cache with `pickle` — use JSON with an explicit schema instead; if pickle is unavoidable (e.g. scikit-learn models), load only from paths under version control, never from user-supplied input.
+
+134. NEVER use `jsonpickle`, `dill`, or `shelve` with untrusted input — they are `pickle` wrappers with the same RCE attack surface.
+
+---
+
+## Code Injection
+
+135. NEVER call `eval()`, `exec()`, `compile()`, or `__import__()` with any value derived from user input, environment variables from untrusted sources, or LLM output — use `ast.literal_eval()` for safe evaluation of Python literals (strings, numbers, lists, dicts, booleans, None) when you need to parse structured data.
+
+---
+
+## Logging Injection
+
+136. ALWAYS sanitize user-supplied values before interpolating them into log messages — strip or replace `\n`, `\r`, and ANSI escape sequences (`\x1b[...m`) before logging; newline injection allows attackers to forge entirely new log entries.
+
+137. ALWAYS use structured logging with separate key-value fields for user data — user input isolated to a single field value cannot forge additional fields; never build log messages by f-string concatenation with user data.
+
+---
+
+## Error Message Information Disclosure
+
+138. ALWAYS register a global exception handler that catches all unhandled exceptions and returns only a generic error message with HTTP 500 — never propagate `traceback.format_exc()` or raw `str(exception)` to the client in production.
+
+139. NEVER expose SQLAlchemy, asyncpg, or database error messages directly to API clients — catch DB exceptions at the boundary, log detail server-side with `exc_info=True`, return a generic message to the client; DB errors leak table names, column names, and query fragments.
+
+140. ALWAYS set `debug=False` in production — `DEBUG=True` enables the interactive Starlette/Werkzeug debugger which allows arbitrary code execution via the debug console PIN.
+
+141. NEVER include internal filesystem paths, module names, or line numbers in error responses — attackers use these to target specific vulnerable library versions.
+
+---
+
+## Security Misconfiguration
+
+142. ALWAYS verify `DEBUG=False`, `TESTING=False`, and `ENVIRONMENT=production` in a startup health check that raises `RuntimeError` if misconfigured in a non-local environment — misconfigured debug mode is an RCE vector, not just information disclosure.
+
+143. NEVER deploy with default credentials on any component: PostgreSQL (`postgres/postgres`), Redis (no auth), pgAdmin, Grafana (`admin/admin`), RabbitMQ (`guest/guest`) — automate a CI check that asserts connection failure with default credentials.
+
+144. NEVER expose admin panels (`/admin`, `/flower`, `/pgadmin`, `/grafana`) on the public internet without a network-layer restriction (VPN, IP allowlist) — admin UIs bypass application-layer controls.
+
+145. ALWAYS remove or gate `/docs` and `/redoc` FastAPI endpoints in production — interactive API docs allow unauthenticated attackers to explore and test your full API surface; disable with `app = FastAPI(docs_url=None, redoc_url=None)` or protect behind authentication middleware.
+
+---
+
+## Open Redirect — Deep Implementation
+
+146. ALWAYS parse redirect URLs with `urllib.parse.urlparse()` and validate that `scheme` is `https` and `netloc` exactly matches an entry in your allowlist — never do string prefix matching.
+
+147. ALWAYS normalize before validating: call `urllib.parse.unquote()` and `unicodedata.normalize('NFKC', url)` — double-encoded and Unicode-normalized variants bypass string-level allowlist checks.
+
+148. ALWAYS reject redirect URLs where `netloc` contains `@` (authority confusion: `https://yoursite.com@evil.com`) or where the scheme is empty (protocol-relative: `//evil.com`).
+
+---
+
+## Cache Poisoning via Unkeyed Headers
+
+149. NEVER use `X-Forwarded-Host`, `X-Original-Host`, or `X-Host` headers as inputs to cache keys, URL generation, or response bodies — attackers who control these headers control URL generation in your app; normalize to `SITE_URL` from environment config.
+
+150. ALWAYS configure your reverse proxy to strip `X-Forwarded-Host` and `X-Original-Host` from incoming requests before they reach your application — reconstruct protocol from TLS state, not from `X-Forwarded-Proto`.
+
+151. NEVER generate password reset links, OAuth `redirect_uri` values, or email confirmation links from `request.headers["host"]` — always use the `SITE_URL` env var; host header injection here produces phishing links pointing to an attacker's domain.
+
+---
+
+## Clickjacking — Complete
+
+152. ALWAYS include `frame-ancestors 'none'` in your CSP header — this supersedes `X-Frame-Options: DENY` in modern browsers; keep both for legacy compatibility.
+
+153. NEVER rely on `X-Frame-Options` alone — it is not honored consistently across all user agents; use `frame-ancestors` in CSP as the primary control.
+
+---
+
+## Mass Enumeration Protection
+
+154. ALWAYS use random UUIDs (v4) or `secrets.token_urlsafe()` as resource IDs in URLs — sequential integer IDs and timestamp-ordered UUIDs (v1, v7) allow full resource enumeration by incrementing; UUID v4 makes the key space infeasible to brute-force.
+
+155. NEVER expose a total record count in list responses unless required — `"total": 48291` tells a scraper exactly how many requests to make; use `"has_more": true/false` instead.
+
+---
+
+## Injection — XPATH and LDAP
+
+156. NEVER interpolate user input into XPath expressions — use an XML library's variable binding mechanism (e.g. `lxml`'s `variables` parameter) rather than string concatenation; for SAML assertions, always validate signatures before attribute extraction to prevent SAML wrapping attacks.
+
+157. NEVER interpolate user input into LDAP filter strings — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server. — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.

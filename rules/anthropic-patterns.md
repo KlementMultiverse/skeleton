@@ -141,11 +141,104 @@ paths: ["*.py", "app/**/*.py", "main.py"]
 39. For coding agents: cap codebase context at 50k tokens — use RAG to select relevant files
 40. NEVER send full file contents for files >500 lines — chunk and select relevant sections
 
+## Extended Thinking
+
+41. Enable extended thinking for complex reasoning tasks (math, multi-step logic, hard code review):
+    ```python
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=16000,
+        thinking={"type": "enabled", "budget_tokens": 10000},
+        messages=[{"role": "user", "content": "Solve..."}]
+    )
+    # thinking blocks come BEFORE text blocks in response.content
+    for block in response.content:
+        if block.type == "thinking":
+            # internal reasoning — do NOT send to users
+            pass
+        elif block.type == "text":
+            print(block.text)
+    ```
+42. `budget_tokens` must be < `max_tokens` — extended thinking uses tokens from the max_tokens budget
+43. Thinking blocks MUST be included when you pass prior assistant turns back — strip them to save tokens
+44. NEVER display thinking blocks to end users — they are internal reasoning artifacts
+45. Use extended thinking ONLY when needed — it costs more tokens and is slower
+
+## Vision (Image Input)
+
+46. Pass images as content blocks alongside text:
+    ```python
+    # From URL
+    messages=[{"role": "user", "content": [
+        {"type": "image", "source": {"type": "url", "url": "https://example.com/image.png"}},
+        {"type": "text", "text": "What does this diagram show?"}
+    ]}]
+
+    # From base64 (for local files)
+    import base64
+    with open("image.png", "rb") as f:
+        data = base64.standard_b64encode(f.read()).decode("utf-8")
+    messages=[{"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}},
+        {"type": "text", "text": "What's in this screenshot?"}
+    ]}]
+    ```
+47. Supported media types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
+48. Max image size: 5MB per image, up to 20 images per request
+49. URL images are fetched by Anthropic's servers — NEVER use URLs containing credentials
+
+## Batches API
+
+50. Use Batches API for bulk processing (100s–1000s of requests) — 50% cheaper than real-time:
+    ```python
+    batch = await client.messages.batches.create(
+        requests=[
+            {"custom_id": f"req-{i}", "params": {
+                "model": "claude-haiku-4-5",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": text}]
+            }}
+            for i, text in enumerate(texts)
+        ]
+    )
+    # Poll until complete
+    while batch.processing_status != "ended":
+        await asyncio.sleep(60)
+        batch = await client.messages.batches.retrieve(batch.id)
+    # Stream results
+    async for result in await client.messages.batches.results(batch.id):
+        if result.result.type == "succeeded":
+            print(result.custom_id, result.result.message.content[0].text)
+    ```
+51. Batches process within 24 hours — NEVER use for latency-sensitive paths
+52. Use Batches API for: bulk classification, embedding generation prep, nightly summaries, dataset labeling
+
+## Files API (beta)
+
+53. Upload reusable files once, reference by ID in multiple requests — avoids resending large content:
+    ```python
+    # Upload once
+    with open("codebase.txt", "rb") as f:
+        file = await client.beta.files.upload(
+            file=("codebase.txt", f, "text/plain")
+        )
+    file_id = file.id
+
+    # Reference in messages (no re-upload)
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "Review this codebase for security issues"},
+        {"type": "document", "source": {"type": "file", "file_id": file_id}}
+    ]}]
+    ```
+54. Files are stored server-side — `client.beta.files.list()`, `delete(file_id)`, `retrieve(file_id)`
+55. Use Files API for: large context docs shared across many requests, uploaded PDFs, static reference material
+56. NEVER store sensitive user data via Files API — files persist server-side
+
 ## Coding Agent Specific
 
-41. Agent runs tool loop until `stop_reason == "end_turn"` — no fixed step count
-42. Always cap with `max_iterations` guard — NEVER let agent loop without limit
-43. Log every tool call: tool name, input, output, duration — full audit trail
-44. Sandbox isolation is mandatory for code execution — NEVER run agent-generated code on host
-45. Commit message generation: use `claude-haiku-4-5` (cheap, fast, good enough)
-46. PR body generation: use `claude-sonnet-4-6` (needs quality reasoning about changes)
+57. Agent runs tool loop until `stop_reason == "end_turn"` — no fixed step count
+58. Always cap with `max_iterations` guard — NEVER let agent loop without limit
+59. Log every tool call: tool name, input, output, duration — full audit trail
+60. Sandbox isolation is mandatory for code execution — NEVER run agent-generated code on host
+61. Commit message generation: use `claude-haiku-4-5` (cheap, fast, good enough)
+62. PR body generation: use `claude-sonnet-4-6` (needs quality reasoning about changes)

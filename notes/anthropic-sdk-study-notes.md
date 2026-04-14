@@ -304,18 +304,142 @@ def truncate_middle(messages: list, keep_first: int = 1) -> list:
 
 ---
 
-## How all 9 concepts connect in the coding agent
+## Concept 10 — Extended Thinking
+
+**Analogy:** A chess player who works through moves in their head before speaking. The "thinking" is internal — you only hear their conclusion. Extended thinking gives Claude a scratchpad to reason step-by-step before answering.
+
+```python
+response = await client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=16000,
+    thinking={"type": "enabled", "budget_tokens": 10000},
+    messages=[{"role": "user", "content": "Why does this async bug only appear under load?"}]
+)
+
+for block in response.content:
+    if block.type == "thinking":
+        pass          # internal reasoning — keep for multi-turn but never show users
+    elif block.type == "text":
+        print(block.text)   # the actual answer
+```
+
+**When to use:**
+- Complex debugging (why does this fail under race conditions?)
+- Architecture decisions (which design pattern fits best?)
+- Security audits (what attack vectors does this code expose?)
+- NOT for simple tasks — costs more tokens and is slower
+
+**Key rule:** `budget_tokens` must be less than `max_tokens`. If thinking uses 10k tokens, max_tokens must be >10k.
+
+---
+
+## Concept 11 — Vision (Image Input)
+
+**Analogy:** Showing a mechanic a photo of the broken part instead of trying to describe it. Images transmit information that text can't.
+
+```python
+import base64
+
+# From a local file
+with open("screenshot.png", "rb") as f:
+    data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+response = await client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": data}
+        },
+        {"type": "text", "text": "What errors are shown in this screenshot?"}
+    ]}]
+)
+```
+
+**For coding agents:** Pass screenshots of UI bugs, error dialogs, or browser dev tools output. Claude reads them accurately.
+
+Supported: `image/jpeg`, `image/png`, `image/gif`, `image/webp`. Max 5MB per image, up to 20 per request.
+
+---
+
+## Concept 12 — Batches API
+
+**Analogy:** Sending all your letters in one postal bag vs. driving to the post office for each one. Batches = cheaper, slower, bulk processing.
+
+```python
+# Submit 1000 requests at once
+batch = await client.messages.batches.create(
+    requests=[
+        {"custom_id": f"doc-{i}", "params": {
+            "model": "claude-haiku-4-5",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": f"Summarize: {doc}"}]
+        }}
+        for i, doc in enumerate(documents)
+    ]
+)
+
+# Come back later (processes within 24 hours)
+while batch.processing_status != "ended":
+    await asyncio.sleep(60)
+    batch = await client.messages.batches.retrieve(batch.id)
+
+async for result in await client.messages.batches.results(batch.id):
+    if result.result.type == "succeeded":
+        summaries[result.custom_id] = result.result.message.content[0].text
+```
+
+**50% cheaper** than real-time. Use for: nightly summaries, bulk classification, dataset labeling, offline analysis. NEVER for anything user-facing.
+
+---
+
+## Concept 13 — Files API
+
+**Analogy:** Uploading a document to Google Drive once vs. emailing it as an attachment every time. Upload once, reference by ID.
+
+```python
+# Upload a large file once
+with open("large_codebase.txt", "rb") as f:
+    file = await client.beta.files.upload(
+        file=("large_codebase.txt", f, "text/plain")
+    )
+
+# Reference it in many requests without re-sending 100k tokens
+response = await client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    messages=[{"role": "user", "content": [
+        {"type": "document", "source": {"type": "file", "file_id": file.id}},
+        {"type": "text", "text": "Find all security vulnerabilities"}
+    ]}]
+)
+
+# Manage files
+files = await client.beta.files.list()
+await client.beta.files.delete(file.id)
+```
+
+**For coding agents:** Upload the entire codebase once per session. Reuse across all turns. Saves bandwidth and is faster than including text in every message.
+
+---
+
+## How all 13 concepts connect in the coding agent
 
 ```
-1. Client init     → AsyncAnthropic created once at startup
-2. Messages API    → send task + conversation history
-3. Tool use loop   → read files, write files, run commands
-4. Streaming       → show progress to user in real-time
-5. Token counting  → check codebase fits in context before sending
-6. Prompt caching  → cache codebase content (same across turns)
-7. Structured out  → get structured result (files changed, PR title)
-8. Error handling  → retry on rate limits, fail fast on bad requests
-9. Context mgmt    → truncate old tool results when context fills up
+1. Client init      → AsyncAnthropic created once at startup
+2. Messages API     → send task + conversation history
+3. Tool use loop    → read files, write files, run commands
+4. Streaming        → show progress to user in real-time
+5. Token counting   → check codebase fits in context before sending
+6. Prompt caching   → cache codebase content (same across turns)
+7. Structured out   → get structured result (files changed, PR title)
+8. Error handling   → retry on rate limits, fail fast on bad requests
+9. Context mgmt     → truncate old tool results when context fills up
+10. Ext. thinking   → hard debugging and architecture decisions
+11. Vision          → read UI screenshots, error dialogs
+12. Batches API     → nightly summaries, bulk analysis (not real-time)
+13. Files API       → upload codebase once, reference across all turns
 ```
 
 This is the complete Anthropic SDK layer of the coding agent.

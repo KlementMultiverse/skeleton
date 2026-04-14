@@ -25,6 +25,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `rag-patterns.md` | L11 | Embeddings, pgvector, chunking, hybrid search, reranking, RAGAS |
 | `security-complete.md` | L12 | OWASP API Top 10, JWT attacks, SSRF, CORS, encryption, RLS, DoS |
 | `performance-patterns.md` | L13 | Profiling, index design, caching, LLM cost, ORJSONResponse, uvloop |
+| `observability-patterns.md` | L14 | Langfuse, LangSmith, cost attribution, RAGAS, LLM-as-judge, OTel |
 
 ---
 
@@ -42,6 +43,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `rag-pgvector-study-notes.md` | Embeddings, chunking, hybrid search, reranking, RAGAS evaluation |
 | `security-study-notes.md` | OWASP API Top 10, JWT algorithm confusion, SSRF, encryption, audit logging |
 | `performance-study-notes.md` | Profiling, query optimization, caching strategies, LLM cost, measurement |
+| `llm-observability-study-notes.md` | Langfuse tracing, cost attribution, RAGAS evals, LLM-as-judge, OTel |
 
 ---
 
@@ -83,6 +85,8 @@ A new version is committed after every learning session or rule update.
 | v0.8.0 | L12 — Security OWASP (BOLA, mass assignment, JWT alg confusion, SSRF DNS, CORS, field encryption, RLS, DoS, 85 rules) |
 | v0.8.6 | L12 final — 188 rules after 6 iterations (kid/jku JWT, BFLA, Argon2id, WebSocket, SSTI, container, HTTP smuggling, deserialization, STRIDE) |
 | v0.9.0 | L13 — Performance (profiling, index design, caching, LLM cost/caching, ORJSONResponse, uvloop, 110 rules) |
+| v0.9.6 | L13 final — 146 rules after 6 iterations (pg_stat_statements, nplusone, SKIP LOCKED, keyset pagination, async worker tuning, embedding batch sizing) |
+| v1.0.0 | L14 — LLM Observability (Langfuse, LangSmith, cost attribution, RAGAS, LLM-as-judge, OTel, 135 rules) |
 
 ---
 
@@ -95,7 +99,6 @@ Rules files will be added as each level is completed:
 - [x] L11 — RAG + pgvector (embeddings, hybrid search, reranking)
 - [x] L12 — Security deep dive (OWASP API Top 10)
 - [x] L13 — Performance (query optimization, caching, LLM cost)
-- [ ] L13 — Performance (query optimization, caching)
-- [ ] L14 — LLM Observability (Langfuse, tracing, evals)
+- [x] L14 — LLM Observability (Langfuse, tracing, evals)
 - [ ] L15 — Production deployment (Docker, health checks, migrations)
 - [ ] L16 — Senior patterns (ADRs, system design, cost modeling)

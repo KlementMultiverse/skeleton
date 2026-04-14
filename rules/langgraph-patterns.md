@@ -692,3 +692,168 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
      results = await graph.abatch(inputs, configs)
      ```
 128. Each input in `abatch()` must have its own unique `thread_id` config — sharing a thread_id across batch inputs causes checkpoint conflicts
+
+## graph.as_tool() — Wrapping a Graph as a Tool
+
+129. Use `graph.as_tool()` to expose a compiled graph as a LangChain tool so a parent agent can call it — the standard pattern for nested multi-agent architectures:
+     ```python
+     # Research subgraph
+     research_graph = research_builder.compile()
+
+     research_tool = research_graph.as_tool(
+         name="research_agent",
+         description="Research a topic thoroughly. Input: the research question as a string.",
+         arg_types={"input": str},  # what the parent agent passes
+     )
+
+     # Parent orchestrator uses research_graph as just another tool
+     orchestrator = create_react_agent(
+         model,
+         tools=[research_tool, write_tool, summarize_tool],
+     )
+     ```
+130. `graph.as_tool()` is preferred over calling `graph.ainvoke()` manually inside a `@tool` function — it keeps tool metadata consistent and handles streaming correctly
+
+## FastAPI + LangGraph Streaming Integration
+
+131. Wire `graph.astream()` to a FastAPI SSE endpoint — the standard pattern for serving LangGraph agents over HTTP:
+     ```python
+     from fastapi import FastAPI
+     from fastapi.responses import StreamingResponse
+     import json
+
+     app = FastAPI()
+
+     @app.post("/chat")
+     async def chat(request: ChatRequest):
+         config = {
+             "recursion_limit": 50,
+             "configurable": {"thread_id": request.thread_id},
+         }
+
+         async def generate():
+             async for chunk in graph.astream(
+                 {"messages": [HumanMessage(request.message)]},
+                 config,
+                 stream_mode="messages",
+                 version="v2",
+             ):
+                 if chunk["type"] == "messages":
+                     msg_chunk, metadata = chunk["data"]
+                     if msg_chunk.content and metadata["langgraph_node"] == "chatbot":
+                         yield f"data: {json.dumps({'content': msg_chunk.content})}\n\n"
+             yield "data: [DONE]\n\n"
+
+         return StreamingResponse(generate(), media_type="text/event-stream")
+     ```
+132. Always set `recursion_limit` in the FastAPI handler config — unbounded agent loops will hold the HTTP connection open indefinitely
+
+## SystemMessage Injection Pattern
+
+133. Prepend a `SystemMessage` to messages at call time inside the node — do NOT store it in graph state (it would accumulate with every turn):
+     ```python
+     from langchain_core.messages import SystemMessage
+
+     async def chatbot(state: MessagesState, config: RunnableConfig) -> dict:
+         user_id = config["configurable"].get("user_id", "anonymous")
+         system = SystemMessage(
+             f"You are a helpful assistant. User ID: {user_id}. Today: {date.today()}."
+         )
+         # System message prepended at call time, NOT saved to state
+         response = await model_with_tools.ainvoke([system] + state["messages"])
+         return {"messages": response}
+     ```
+134. NEVER append `SystemMessage` to `state["messages"]` — it accumulates across turns and inflates the context; always inject dynamically in the node body
+
+## store.aget() — Exact Key Retrieval
+
+135. Use `store.aget(namespace, key)` for exact key lookup — faster than `asearch()` when you know the exact key:
+     ```python
+     async def load_profile(state: MessagesState, runtime: Runtime[AppContext]) -> dict:
+         user_id = runtime.context.user_id
+
+         # Exact lookup — returns Item or None
+         item = await runtime.store.aget(("profiles", user_id), "main")
+         if item:
+             profile = item.value  # the dict you stored with aput()
+         else:
+             profile = {"name": "Unknown", "preferences": {}}
+
+         return {"profile": profile}
+     ```
+136. Store API summary: `aput()` write, `aget()` exact read, `asearch()` semantic/keyword search, `adelete()` delete, `alist()` list namespace
+
+## LCEL Chains as Nodes
+
+137. Any LangChain `Runnable` (including LCEL `|` chains) can be used directly as a node — LangGraph calls `.invoke()` on it with the state dict:
+     ```python
+     from langchain_core.prompts import ChatPromptTemplate
+     from langchain_core.output_parsers import StrOutputParser
+
+     # LCEL chain
+     summarize_chain = (
+         ChatPromptTemplate.from_template("Summarize this in one sentence: {text}")
+         | ChatAnthropic(model="claude-haiku-4-5-20251001")
+         | StrOutputParser()
+     )
+
+     # Add directly as a node — LangGraph passes state dict as input
+     # Chain receives {"text": "...", "messages": [...]} — use only what it needs
+     builder.add_node("summarizer", summarize_chain)
+     ```
+138. LCEL chain nodes receive the FULL state dict as input — use `itemgetter` or a `RunnableLambda` wrapper if the chain only needs specific keys:
+     ```python
+     from operator import itemgetter
+     from langchain_core.runnables import RunnableLambda
+
+     # Extract only the "text" field before passing to the chain
+     summarize_node = (
+         RunnableLambda(lambda state: {"text": state["text"]})
+         | summarize_chain
+         | RunnableLambda(lambda result: {"summary": result})
+     )
+     builder.add_node("summarizer", summarize_node)
+     ```
+
+## Middleware — LangChain Callback System
+
+139. LangGraph has no built-in middleware layer — use **LangChain callbacks** for cross-cutting concerns (logging, timing, cost tracking, error alerting):
+     ```python
+     from langchain_core.callbacks import AsyncCallbackHandler
+     import time
+
+     class AgentMetricsHandler(AsyncCallbackHandler):
+         async def on_llm_start(self, serialized, messages, **kwargs):
+             self._start = time.monotonic()
+             logger.info(f"LLM call: {serialized.get('name')}")
+
+         async def on_llm_end(self, response, **kwargs):
+             duration = time.monotonic() - self._start
+             tokens = response.llm_output.get("token_usage", {})
+             logger.info(f"LLM done: {duration:.2f}s, tokens={tokens}")
+
+         async def on_tool_start(self, serialized, input_str, **kwargs):
+             logger.info(f"Tool: {serialized['name']}({input_str[:80]})")
+
+         async def on_tool_error(self, error, **kwargs):
+             logger.error(f"Tool error: {error}")
+     ```
+140. Attach callbacks per-run via config — they fire on every LLM call and tool call within that graph run:
+     ```python
+     config = {
+         "callbacks": [AgentMetricsHandler(), LangSmithCallbackHandler()],
+         "configurable": {"thread_id": "session-1"},
+     }
+     result = await graph.ainvoke(input, config)
+     ```
+141. Attach callbacks at compile time via `graph.with_config()` to apply them to ALL runs of that graph — useful for global observability:
+     ```python
+     instrumented_graph = graph.with_config({
+         "callbacks": [AgentMetricsHandler()],
+         "recursion_limit": 50,
+     })
+     # Now every invoke/astream on instrumented_graph uses these defaults
+     result = await instrumented_graph.ainvoke(input, config)
+     ```
+142. Key callback events for agents: `on_llm_start`, `on_llm_end`, `on_llm_error`, `on_tool_start`, `on_tool_end`, `on_tool_error`, `on_chain_start`, `on_chain_end`
+143. NEVER do blocking I/O in `BaseCallbackHandler` methods — use `AsyncCallbackHandler` for any async operations (DB writes, HTTP calls); sync handlers block the event loop

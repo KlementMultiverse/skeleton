@@ -555,3 +555,140 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
          result = await graph.ainvoke(input, config)
      ```
 115. Checkpointer hierarchy: `InMemorySaver` (no persistence) → `AsyncSqliteSaver` (file, single process) → `AsyncPostgresSaver` (production, multi-process)
+
+## Defining Tools (@tool decorator)
+
+116. Define tools with `@tool` from `langchain_core.tools` — docstring is the tool description the LLM sees; type annotations become the input schema:
+     ```python
+     from langchain_core.tools import tool
+
+     @tool
+     def get_weather(location: str) -> str:
+         """Get the current weather for a given city or location."""
+         return f"72°F and sunny in {location}"
+
+     @tool
+     def search_documents(query: str, max_results: int = 5) -> list[str]:
+         """Search the document store for relevant content.
+
+         Args:
+             query: Natural language search query
+             max_results: Maximum number of results to return (default 5)
+         """
+         return vector_store.search(query, k=max_results)
+     ```
+117. Use `@tool(args_schema=MyPydanticModel)` when the tool has complex nested input — the Pydantic model becomes the full input schema:
+     ```python
+     from pydantic import BaseModel
+     from langchain_core.tools import tool
+
+     class SearchInput(BaseModel):
+         query: str
+         filters: dict[str, str] = {}
+         limit: int = 10
+
+     @tool(args_schema=SearchInput)
+     def advanced_search(query: str, filters: dict[str, str], limit: int) -> list[str]:
+         """Search with optional metadata filters."""
+         return store.search(query, filters=filters, limit=limit)
+     ```
+118. Tool docstring quality directly affects LLM tool selection accuracy — be specific: describe what it does, when to use it, and what it returns
+
+## Accessing configurable Values Inside Nodes
+
+119. Access runtime configurable values inside a node via `RunnableConfig` type hint — the standard way to pass user_id, tenant_id, or feature flags without graph state:
+     ```python
+     from langchain_core.runnables import RunnableConfig
+
+     async def personalized_node(state: MessagesState, config: RunnableConfig) -> dict:
+         user_id = config["configurable"].get("user_id", "anonymous")
+         tenant = config["configurable"].get("tenant_id")
+         # use user_id for personalized behavior
+         return {"messages": [...]}
+
+     # Caller passes these at invoke time
+     config = {
+         "configurable": {
+             "thread_id": "session-1",
+             "user_id": "user-42",
+             "tenant_id": "acme-corp",
+         }
+     }
+     result = graph.invoke(input, config)
+     ```
+120. `RunnableConfig` and `Runtime[Context]` both work — `RunnableConfig` is the older pattern, widely used in tutorials; `Runtime[Context]` is v1.0+, provides type safety. Either is correct.
+
+## checkpoint_id — Direct Checkpoint Replay
+
+121. Use `checkpoint_id` in config to replay from a specific checkpoint, not just the latest state in a thread:
+     ```python
+     # Get history and pick a specific point
+     history = list(graph.get_state_history(config))
+     target = history[3]  # e.g., 4th checkpoint from most recent
+
+     # Replay from EXACTLY that checkpoint
+     replay_config = {
+         "configurable": {
+             "thread_id": "session-1",
+             "checkpoint_id": target.config["configurable"]["checkpoint_id"],
+         }
+     }
+     result = graph.invoke(None, replay_config)
+     ```
+122. Without `checkpoint_id`, `invoke(None, config)` always continues from the LATEST checkpoint in that thread — `checkpoint_id` is required for true point-in-time replay
+
+## Store Semantic Search Configuration
+
+123. `store.asearch(namespace, query="...")` only performs **semantic similarity** search if the store is configured with an embedding function — without it, search falls back to keyword/exact matching:
+     ```python
+     from langchain_anthropic import ChatAnthropic
+     from langgraph.store.memory import InMemoryStore
+
+     # Dev: InMemoryStore with embeddings
+     store = InMemoryStore(
+         index={
+             "embed": ChatAnthropic(model="claude-sonnet-4-6").as_embeddings(),
+             "dims": 1536,
+             "fields": ["data"],   # which fields to embed
+         }
+     )
+
+     # Production: AsyncPostgresStore with embeddings
+     # from langgraph.store.postgres.aio import AsyncPostgresStore
+     # store = AsyncPostgresStore.from_conn_string(DB_URI, index={...})
+     ```
+124. Without embedding configuration, `asearch(query="what is the user's name?")` will NOT find semantically related memories — it only matches exact text; always configure embeddings for memory agents
+
+## filter_messages — Selecting Message Types
+
+125. Use `filter_messages` to select specific message types from the history — useful when you only want to pass human/AI turns to a summarization or classification node:
+     ```python
+     from langchain_core.messages import filter_messages, HumanMessage, AIMessage
+
+     def summarize_node(state: MessagesState) -> dict:
+         # Only pass human and AI turns, exclude tool messages
+         conversation = filter_messages(
+             state["messages"],
+             include_types=[HumanMessage, AIMessage],
+         )
+         summary = summarizer.invoke(conversation)
+         return {"summary": summary.content}
+     ```
+126. `filter_messages(messages, exclude_types=[ToolMessage])` is equivalent — use whichever is more readable for your case
+
+## graph.abatch() — Parallel Graph Runs
+
+127. Use `graph.abatch(inputs, configs)` to run multiple inputs through the graph in parallel — more efficient than sequential `ainvoke` calls:
+     ```python
+     inputs = [
+         {"messages": [HumanMessage("Summarize doc 1")]},
+         {"messages": [HumanMessage("Summarize doc 2")]},
+         {"messages": [HumanMessage("Summarize doc 3")]},
+     ]
+     configs = [
+         {"configurable": {"thread_id": f"batch-{i}"}}
+         for i in range(len(inputs))
+     ]
+     results = await graph.abatch(inputs, configs)
+     ```
+128. Each input in `abatch()` must have its own unique `thread_id` config — sharing a thread_id across batch inputs causes checkpoint conflicts

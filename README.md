@@ -30,6 +30,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `senior-patterns.md` | L16 | ADRs, system design, technical debt, LLM cost modeling, DORA metrics |
 | `voice-patterns.md` | L17 | Latency budget, audio formats, Ultravox, VAD, telephony, PCI-DSS, GDPR, SLOs |
 | `memory-patterns.md` | L18 | Mem0, Qdrant HNSW, memory layers, injection, extraction, GDPR erasure, multi-agent |
+| `distributed-patterns.md` | L19 | Matrix/Synapse, federation, event DAG, Application Services, event-driven, Kafka, Saga |
 
 ---
 
@@ -52,6 +53,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `senior-patterns-study-notes.md` | ADRs, system design, tech debt, LLM cost, code review, event-driven, DORA |
 | `voice-study-notes.md` | Latency budget, audio formats, Ultravox, VAD/barge-in, telephony, production architecture |
 | `ai-memory-study-notes.md` | Memory layers, Mem0 API, Qdrant, injection, extraction, privacy, pgvector vs Qdrant |
+| `distributed-systems-study-notes.md` | CAP/PACELC, Raft, Matrix protocol, Synapse, AS integration, event sourcing, Kafka |
 
 ---
 
@@ -99,6 +101,7 @@ A new version is committed after every learning session or rule update.
 | v1.2.0 | L16 — Senior Patterns (ADRs, system design, tech debt, LLM cost, DORA, chaos engineering, 224 rules) |
 | v1.3.0 | L17 — Real-Time Voice (latency budget, Ultravox, VAD, telephony, PCI-DSS, GDPR, SLOs, 199 rules) |
 | v1.4.0 | L18 — AI Memory (Mem0, Qdrant HNSW, memory layers, injection, extraction, GDPR erasure, multi-agent, 159 rules) |
+| v1.5.0 | L19 — Distributed Systems (Matrix/Synapse, federation, event DAG, AS integration, Kafka, Saga, CQRS, 166 rules) |
 
 ---
 
@@ -116,3 +119,4 @@ Rules files will be added as each level is completed:
 - [x] L16 — Senior patterns (ADRs, system design, cost modeling)
 - [x] L17 — Real-time voice (Ultravox, WebRTC, latency budgets, telephony)
 - [x] L18 — AI Memory (Mem0, Qdrant, memory layers, injection, GDPR erasure)
+- [x] L19 — Distributed Systems (Matrix/Synapse, federation, event DAG, Kafka, Saga)

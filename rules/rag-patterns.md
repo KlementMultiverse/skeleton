@@ -13,7 +13,7 @@ Rules are numbered for traceability. Reference them in code comments and PR revi
 
 1. ALWAYS run `CREATE EXTENSION IF NOT EXISTS vector` in a migration before creating any vector column — the extension does not exist by default.
 2. ALWAYS specify the exact dimension count in the Vector column: `Vector(1024)`, `Vector(1536)`, `Vector(384)` — dimension mismatch raises a hard error at insert time.
-3. ALWAYS create an HNSW index, not IVFFlat, for production: `USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`.
+3. ALWAYS create an HNSW index, not IVFFlat, for production: `USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200)` — `ef_construction=64` is too low and hurts recall quality.
 4. NEVER use IVFFlat in production if you are inserting documents continuously — IVFFlat requires periodic `REINDEX` to include new rows in the index.
 5. ALWAYS match the index operator class to the query operator: `vector_cosine_ops` → `<=>`, `vector_l2_ops` → `<->`. Mismatch causes a silent full table scan.
 6. ALWAYS create the HNSW index in an Alembic migration using `op.execute(raw SQL)` — SQLAlchemy DDL does not support pgvector index syntax natively.
@@ -148,3 +148,53 @@ Rules are numbered for traceability. Reference them in code comments and PR revi
 85. ALWAYS add a composite index on `(tenant_id, document_id)` for efficient per-document deletes and existence checks.
 86. NEVER use `SELECT *` from `document_chunks` in retrieval queries — always select only the columns needed (id, content, parent_content, document_id, chunk_index, score).
 87. ALWAYS monitor embedding API latency per batch and log it — spikes indicate rate limiting or upstream degradation before it affects users.
+
+## pgvector Storage Optimization
+
+88. Use `halfvec` instead of `vector` for large embedding tables — stores each dimension as 16-bit float instead of 32-bit, cutting storage by 50% with negligible quality loss:
+    ```sql
+    -- Migration: use halfvec for 1536-dim embeddings
+    ALTER TABLE document_chunks ADD COLUMN embedding halfvec(1536);
+    CREATE INDEX ON document_chunks USING hnsw (embedding halfvec_cosine_ops)
+        WITH (m = 16, ef_construction = 200);
+    ```
+    Use `halfvec_cosine_ops` (not `vector_cosine_ops`) with the `halfvec` type.
+89. ALWAYS use `CREATE INDEX CONCURRENTLY` when adding an HNSW index to an existing production table — the standard `CREATE INDEX` acquires a write lock that blocks all inserts and updates for the duration of the build:
+    ```sql
+    CREATE INDEX CONCURRENTLY idx_chunks_embedding
+        ON document_chunks USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 200);
+    ```
+90. NEVER add a vector index without running `VACUUM ANALYZE document_chunks` after bulk ingestion — PostgreSQL statistics must be up to date for the query planner to use the index correctly
+
+## Query Optimization — HyDE and Embedding Cache
+
+91. Use HyDE (Hypothetical Document Embeddings) for recall-sensitive searches — instead of embedding the raw query, ask the LLM to generate a short hypothetical answer, then embed that answer:
+    ```python
+    async def hyde_search(query: str, tenant_id: str) -> list[Chunk]:
+        # Step 1: generate hypothetical answer
+        hypothesis = await llm.ainvoke(
+            f"Write a short factual answer to: {query}\nAnswer:"
+        )
+        # Step 2: embed the hypothesis, not the query
+        query_vec = await embed(hypothesis.content, input_type="query")
+        # Step 3: search with hypothesis embedding
+        return await vector_search(query_vec, tenant_id)
+    ```
+    HyDE improves recall by 10-30% on knowledge-dense corpora where the query and documents use different vocabulary.
+92. NEVER use HyDE for queries that are already document-like (e.g., `"FastAPI dependency injection example"`) — HyDE's benefit is bridging query/document vocabulary gaps; it adds latency with no gain when vocabulary already matches
+93. Cache query embeddings by content hash to avoid re-embedding identical queries — repeat queries are common in production (same user asks same question, or query expansion produces the same term):
+    ```python
+    import hashlib, json
+    from functools import lru_cache
+
+    async def get_query_embedding(query: str) -> list[float]:
+        cache_key = hashlib.sha256(query.encode()).hexdigest()
+        cached = await redis.get(f"emb:{cache_key}")
+        if cached:
+            return json.loads(cached)
+        vec = await embed(query, input_type="query")
+        await redis.setex(f"emb:{cache_key}", 3600, json.dumps(vec))  # 1hr TTL
+        return vec
+    ```
+94. NEVER cache document embeddings at query time — document embeddings are computed once at ingest and stored in PostgreSQL; only query embeddings benefit from a Redis cache

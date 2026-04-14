@@ -36,7 +36,7 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
 13. Call `await checkpointer.setup()` ONCE before first use — creates required tables; run in deploy pipeline, NOT in lifespan
 14. Always pass `config = {"configurable": {"thread_id": "..."}}` when using a checkpointer — without `thread_id`, checkpointing silently does nothing
 15. NEVER reuse the same `thread_id` for different users — thread isolation is total; threads cannot see each other's state
-16. Run `checkpointer.setup()` in the deploy pipeline (like alembic upgrade head), NOT in application startup
+16. If `checkpointer.setup()` has NOT been run, the first `invoke()` call will raise `UndefinedTable` (PostgreSQL) or `OperationalError` (SQLite) — if you see these errors on first run, `setup()` was skipped
 
 ## Human-in-the-Loop
 
@@ -1150,3 +1150,116 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
      ```
 185. Pydantic state gives you: field defaults, type coercion, and `model_validators` — use it when you want to enforce invariants on state transitions (e.g., `step_count` must never be negative)
 186. NEVER use `BaseModel` state when you need `Annotated` reducers on complex types — Pydantic's `Field` and LangGraph's `Annotated[..., reducer]` can conflict; test thoroughly or use `TypedDict` for reducer-heavy state
+
+## Graph Compilation — Compile Once at Startup
+
+187. Compile the graph ONCE at application startup (in lifespan), store it as a module-level or app-state variable, and reuse it across all requests — `compile()` is expensive (validates topology, builds edge maps); calling it per request wastes CPU:
+     ```python
+     from contextlib import asynccontextmanager
+     from fastapi import FastAPI
+
+     compiled_graph = None  # module-level — set once
+
+     @asynccontextmanager
+     async def lifespan(app: FastAPI):
+         global compiled_graph
+         checkpointer = AsyncPostgresSaver(pool)
+         await checkpointer.setup()
+         compiled_graph = builder.compile(checkpointer=checkpointer)  # once
+         yield
+         await pool.close()
+
+     app = FastAPI(lifespan=lifespan)
+
+     @app.post("/chat")
+     async def chat(request: ChatRequest):
+         result = await compiled_graph.ainvoke(...)   # reuse
+     ```
+188. NEVER call `builder.compile()` inside a route handler or node — the compiled graph is stateless and thread-safe; it can be shared across all concurrent requests without copying
+
+## Graceful Shutdown — Closing the Connection Pool
+
+189. Close the `AsyncConnectionPool` in the lifespan teardown (after `yield`) — an unclosed pool leaks PostgreSQL connections and causes `too many connections` errors on the next deploy:
+     ```python
+     @asynccontextmanager
+     async def lifespan(app: FastAPI):
+         pool = AsyncConnectionPool(conninfo=DB_URI, max_size=20, ...)
+         checkpointer = AsyncPostgresSaver(pool)
+         await checkpointer.setup()
+         graph = builder.compile(checkpointer=checkpointer)
+         app.state.graph = graph
+         yield                   # app runs
+         await pool.close()      # teardown — closes all connections cleanly
+     ```
+190. If using `AsyncPostgresStore` alongside `AsyncPostgresSaver`, close both pools in teardown — they are separate pool instances; closing the checkpointer pool does NOT close the store pool
+
+## Runtime Model Configuration
+
+191. Make the LLM model a runtime-configurable value instead of a hard-coded object — enables A/B testing, per-tenant model routing, and cost optimization without graph changes:
+     ```python
+     from langchain_anthropic import ChatAnthropic
+     from langchain_core.runnables import RunnableConfig
+
+     async def call_model(state: MessagesState, config: RunnableConfig) -> dict:
+         model_name = config["configurable"].get("model", "claude-sonnet-4-6")
+         model = ChatAnthropic(model=model_name)   # constructed per-call from config
+         response = await model.ainvoke(state["messages"])
+         return {"messages": response}
+
+     # Caller controls the model
+     result = await graph.ainvoke(
+         input,
+         {"configurable": {"thread_id": tid, "model": "claude-haiku-4-5-20251001"}}
+     )
+     ```
+192. Cache `ChatAnthropic` instances by model name if construction cost is a concern — but NEVER share a stateful client across models; construct a fresh instance when `model_name` changes
+
+## Testing Streaming Behavior
+
+193. Test `astream()` by collecting all chunks into a list and asserting on their content — no FastAPI or HTTP client needed:
+     ```python
+     import pytest
+     from langgraph.checkpoint.memory import InMemorySaver
+     from langchain_core.messages import HumanMessage, AIMessage
+     from unittest.mock import AsyncMock, patch
+
+     @pytest.mark.asyncio
+     async def test_streaming_emits_tokens():
+         checkpointer = InMemorySaver()
+         graph = builder.compile(checkpointer=checkpointer)
+         config = {"configurable": {"thread_id": "stream-test-1"}}
+
+         chunks = []
+         async for chunk in graph.astream(
+             {"messages": [HumanMessage("Hello")]},
+             config,
+             stream_mode="updates",
+         ):
+             chunks.append(chunk)
+
+         assert len(chunks) > 0
+         assert any("messages" in chunk for chunk in chunks)
+     ```
+194. Test HITL streaming by asserting `__interrupt__` appears in chunks, then resuming and asserting on the continuation:
+     ```python
+     @pytest.mark.asyncio
+     async def test_hitl_interrupt_then_resume():
+         checkpointer = InMemorySaver()
+         graph = builder.compile(checkpointer=checkpointer)
+         config = {"configurable": {"thread_id": "hitl-stream-test"}}
+
+         chunks = list()
+         async for chunk in graph.astream({"task": "draft email"}, config, stream_mode="updates"):
+             chunks.append(chunk)
+             if "__interrupt__" in chunk:
+                 break  # paused — do not drain further
+
+         assert any("__interrupt__" in c for c in chunks)
+
+         # Resume
+         resume_chunks = []
+         async for chunk in graph.astream(Command(resume="approved"), config, stream_mode="updates"):
+             resume_chunks.append(chunk)
+
+         assert len(resume_chunks) > 0
+     ```

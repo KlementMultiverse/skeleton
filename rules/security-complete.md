@@ -552,4 +552,50 @@ paths: ["**"]
 
 ## API Gateway vs Application Security Split
 
-170. NEVER trust identity headers injected by an API gateway (`X-User-ID`, `X-Tenant-ID`, `X-Authenticated-User`) without verifying they originated from your own trusted gateway — the application MUST re-verify the JWT on every request regardless of gateway validation, OR MUST enforce network policy (firewall / Kubernetes NetworkPolicy) that allows traffic to the app port ONLY from the gateway's IP range; "gateway does auth, app trusts the header" without network-layer enforcement allows any internal-network attacker to forge identity. — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server. — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.
+170. NEVER trust identity headers injected by an API gateway (`X-User-ID`, `X-Tenant-ID`, `X-Authenticated-User`) without verifying they originated from your own trusted gateway — the application MUST re-verify the JWT on every request regardless of gateway validation, OR MUST enforce network policy (firewall / Kubernetes NetworkPolicy) that allows traffic to the app port ONLY from the gateway's IP range; "gateway does auth, app trusts the header" without network-layer enforcement allows any internal-network attacker to forge identity.
+
+---
+
+## Timing Attacks — General
+
+171. ALWAYS use `hmac.compare_digest(a, b)` for ALL security token comparisons — API keys, webhook signatures (`X-Hub-Signature-256`, `X-Stripe-Signature`), HMAC MACs, CSRF tokens — not only password reset tokens; Python's `==` short-circuits on the first differing byte, leaking token prefix length via timing. This is the single most commonly missed constant-time comparison case in production code.
+
+---
+
+## Path Traversal — Deep
+
+172. ALWAYS call `os.path.realpath()` on any user-influenced file path and assert the resolved path starts with the expected base directory before opening the file — symlinks inside a permitted directory can point outside it, bypassing prefix checks on the original path string.
+
+173. ALWAYS strip null bytes (`\x00`) from any user-supplied filename or path before processing — Python's `os.path` and the OS handle null bytes inconsistently across platforms, causing the apparent path and the actual path to diverge.
+
+174. ALWAYS apply `unicodedata.normalize('NFKC', path)` and `urllib.parse.unquote(path)` before any path validation — overlong UTF-8 encodings (`..%c0%af`) and Unicode-normalized variants bypass string-level path checks.
+
+---
+
+## Supply Chain — Maintainer Takeover
+
+175. ALWAYS verify package ownership hasn't changed before approving Dependabot/Renovate PRs for critical dependencies — check PyPI maintainer history for packages in your security path (auth, crypto, HTTP client); legitimate packages taken over by malicious maintainers (`event-stream`, `ua-parser-js` class) are distinct from typosquatting and not caught by name-similarity checks.
+
+---
+
+## Feature Flags for Security Controls
+
+176. ALWAYS wrap new security controls (new auth middleware, rate limit changes, new encryption) in a feature flag so they can be disabled in production without a redeploy if they cause an outage — but ensure feature flag access requires the same privilege level as deploying code; a low-privilege actor disabling a security flag is a security misconfiguration.
+
+177. ALWAYS run new security checks in logging-only (shadow) mode first — log violations without enforcing them, measure false-positive rate, then switch to enforcement; this prevents a misconfigured security control from becoming an outage.
+
+---
+
+## LLM Security — Model-Level Attacks
+
+178. NEVER fine-tune a model on sensitive user data without evaluating membership inference risk first — an attacker can determine whether a specific record was in the training set by probing the model; prefer RAG over fine-tuning for sensitive data corpora.
+
+179. ALWAYS scan LLM output for secret patterns (regex for API key formats, credit card numbers, SSNs) before returning responses to clients — models trained on internet data may verbatim reproduce memorized secrets; output scanning is a defense-in-depth layer before the response reaches the client.
+
+---
+
+## Content-Type and Polyglot Files
+
+180. ALWAYS set an explicit, allowlisted `Content-Type` on every response that serves user-generated content — default to `Content-Disposition: attachment; filename="download"` and `Content-Type: application/octet-stream` for unknown types; forcing download prevents the browser from rendering attacker-controlled content as HTML or script.
+
+181. NEVER rely on magic bytes alone to reject malicious uploads — polyglot files are simultaneously valid in two formats (e.g. a JPEG that is also valid JavaScript); run the uploaded content through a format-specific strict parser (not just a magic-byte check) and reject files that parse successfully as any non-allowed format. (`X-User-ID`, `X-Tenant-ID`, `X-Authenticated-User`) without verifying they originated from your own trusted gateway — the application MUST re-verify the JWT on every request regardless of gateway validation, OR MUST enforce network policy (firewall / Kubernetes NetworkPolicy) that allows traffic to the app port ONLY from the gateway's IP range; "gateway does auth, app trusts the header" without network-layer enforcement allows any internal-network attacker to forge identity. — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server. — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.

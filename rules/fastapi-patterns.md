@@ -110,8 +110,44 @@ paths: ["*.py", "main.py", "app/**/*.py", "routes/**/*.py"]
 
 25. Use `BackgroundTasks` only for fire-and-forget work that can be lost on crash
 26. NEVER use `BackgroundTasks` for work that must survive a server crash — use ARQ or Celery
+27. `BackgroundTasks` swallow exceptions silently — always wrap the task body in `try/except` and log errors:
+    ```python
+    def send_email_task(to: str, subject: str) -> None:
+        try:
+            send_email(to, subject)
+        except Exception:
+            logger.exception("background_email_failed", to=to)
+    ```
+
+## Router-Level Dependencies
+
+28. Apply shared auth/rate-limiting to an entire router via `dependencies=` — no need to repeat on every route:
+    ```python
+    admin_router = APIRouter(
+        prefix="/admin",
+        tags=["admin"],
+        dependencies=[Depends(require_admin)],  # all routes require admin
+    )
+    ```
+29. NEVER repeat the same `Depends(auth)` on every route in a router — use router-level dependencies; repeated deps are easy to miss when adding new routes
+
+## Request.state — Per-Request Context
+
+30. Use `request.state` to attach per-request data in middleware (request_id, authenticated user) so dependencies deeper in the chain can access it without re-fetching:
+    ```python
+    # Middleware attaches
+    async def auth_middleware(request: Request, call_next):
+        user = await get_user_from_token(request)
+        request.state.user = user
+        return await call_next(request)
+
+    # Dependency reads — no DB call needed
+    def current_user(request: Request) -> User:
+        return request.state.user
+    ```
+31. NEVER use `request.state` as a substitute for proper dependency injection — use it only for data that middleware has already resolved; if data needs complex logic, use a `Depends()` dependency
 
 ## Testing
 
-27. Use `httpx.AsyncClient` with `ASGITransport(app=app)` for integration tests — no real server needed
-28. Always clear `dependency_overrides` after each test — full pattern in `testing-patterns.md`
+32. Use `httpx.AsyncClient` with `ASGITransport(app=app)` for integration tests — no real server needed
+33. Always clear `dependency_overrides` after each test — full pattern in `testing-patterns.md`

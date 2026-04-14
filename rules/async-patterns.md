@@ -27,8 +27,7 @@ paths: ["*.py", "app/**/*.py", "routes/**/*.py"]
    — `return_exceptions=True` hides errors silently, tasks continue even when others fail
    — `TaskGroup` cancels all tasks on first failure — correct behavior
 10. NEVER use `asyncio.gather()` for large batches without a Semaphore — floods external APIs
-11. Use `asyncio.Semaphore(10)` to cap concurrent LLM API calls
-12. Use `asyncio.Semaphore` whenever calling external APIs in a loop
+11. Use `asyncio.Semaphore` to cap concurrent calls to any external service in a loop:
     ```python
     sem = asyncio.Semaphore(10)  # max 10 concurrent LLM calls
 
@@ -83,3 +82,40 @@ paths: ["*.py", "app/**/*.py", "routes/**/*.py"]
             async for text in stream.text_stream:
                 yield text
     ```
+
+## ExceptionGroup (Python 3.11+)
+
+21. When multiple tasks in a `TaskGroup` fail, Python raises `ExceptionGroup` — catch it with `except*` syntax (Python 3.11+):
+    ```python
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(task_a())
+            tg.create_task(task_b())
+    except* ValueError as eg:
+        for exc in eg.exceptions:
+            logger.error("task_failed", error=str(exc))
+    except* httpx.HTTPError as eg:
+        raise ExternalServiceError("upstream failed") from eg.exceptions[0]
+    ```
+22. NEVER catch bare `Exception` after `TaskGroup` — it catches `ExceptionGroup` as a whole and hides which tasks failed; use `except*` to handle per-exception-type
+
+## ContextVar — Request-Scoped Data
+
+23. Use `contextvars.ContextVar` to propagate request-scoped values (request_id, user_id) through async call chains without passing them as arguments:
+    ```python
+    from contextvars import ContextVar
+
+    request_id: ContextVar[str] = ContextVar("request_id", default="")
+
+    # Set in middleware
+    async def add_request_id(request: Request, call_next):
+        token = request_id.set(request.headers.get("X-Request-ID", str(uuid4())))
+        response = await call_next(request)
+        request_id.reset(token)
+        return response
+
+    # Read anywhere in the async call chain — no parameter passing needed
+    async def some_service_fn():
+        logger.info("doing work", request_id=request_id.get())
+    ```
+24. `ContextVar` is coroutine-safe — each async task gets its own copy; it does NOT leak between concurrent requests like a global variable would

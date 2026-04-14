@@ -79,3 +79,16 @@ paths: ["*.py", "main.py", "app/**/*.py", "routes/**/*.py"]
 38. Content-Type on all POST/PATCH/PUT requests MUST be `application/json` — reject 415 if wrong
 39. Include `ETag` on GET responses for cacheable resources — enables `If-None-Match` for 304 Not Modified
 40. Return 406 Not Acceptable when client sends `Accept` header your API cannot satisfy (e.g. `Accept: application/xml` on a JSON-only API)
+
+## Webhook Contracts
+
+41. Sign all outgoing webhook payloads with HMAC-SHA256 and include the signature in `X-Webhook-Signature: sha256={hex}` — receivers must verify before processing
+42. NEVER send webhook payloads without a signature — unsigned webhooks allow any attacker to forge events
+43. Include a unique `event_id` (UUID) in every webhook payload — receivers use it to detect and discard replays
+44. Retry failed webhook deliveries with exponential backoff (5 attempts, max 5-minute delay) — receiver server may be temporarily down
+
+## Cache-Control
+
+45. Set `Cache-Control: no-store` on all auth, personal data, and write endpoints — prevents CDN/proxy caching of sensitive responses
+46. Set `Cache-Control: max-age=3600, public` on truly static GET endpoints (lookup tables, reference data)
+47. NEVER omit `Cache-Control` on authenticated endpoints — browsers and proxies may cache them by default if no directive is present

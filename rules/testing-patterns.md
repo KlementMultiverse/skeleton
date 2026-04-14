@@ -341,3 +341,64 @@ async def test_unauthorized_access():
 - Test names must describe what they test: `test_create_note_returns_201`, not `test_create`
 - 100% of auth paths and data mutation paths must have tests — no exceptions
 - Every test that hits a route must assert BOTH the status code AND the response body shape
+
+## factory_boy — Test Data Generation
+
+- Use `factory_boy` to generate test model instances with realistic data — eliminates brittle hand-crafted fixture dicts:
+    ```python
+    import factory
+    from factory.alchemy import SQLAlchemyModelFactory
+
+    class UserFactory(SQLAlchemyModelFactory):
+        class Meta:
+            model = User
+            sqlalchemy_session = None   # set per-test via factory.declare_factory
+
+        id = factory.Sequence(lambda n: n)
+        email = factory.LazyAttribute(lambda o: f"user{o.id}@example.com")
+        hashed_password = factory.LazyFunction(lambda: hash_password("test-pass"))
+        is_active = True
+
+    # In tests
+    user = UserFactory(email="specific@example.com")  # override specific fields
+    admin = UserFactory(role="admin")
+    ```
+- NEVER use bare `User(id=1, email="test@test.com")` in every test — factory overrides are shorter and consistent
+
+## freezegun / time-machine — Time Control
+
+- Use `time-machine` (preferred over `freezegun` in 2026 — faster, no monkey-patching issues) to control time in tests that involve token expiry, rate limit windows, or `created_at` timestamps:
+    ```python
+    import time_machine
+    from datetime import datetime, timezone
+
+    @time_machine.travel("2025-01-15T12:00:00Z", tick=False)
+    def test_token_expires():
+        token = create_access_token(user_id="u1", expires_minutes=30)
+
+        # Travel 31 minutes forward
+        with time_machine.travel("2025-01-15T12:31:00Z"):
+            with pytest.raises(ExpiredTokenError):
+                verify_token(token)
+    ```
+- NEVER use `time.sleep()` or real `datetime.utcnow()` in tests — time-machine eliminates both
+
+## respx — Mock HTTP Calls to External Services
+
+- Use `respx` to mock HTTP requests made via `httpx.AsyncClient` — tests actual HTTP serialisation without hitting external APIs:
+    ```python
+    import respx
+    import httpx
+
+    @respx.mock
+    async def test_stripe_charge():
+        respx.post("https://api.stripe.com/v1/charges").mock(
+            return_value=httpx.Response(200, json={"id": "ch_123", "status": "succeeded"})
+        )
+        result = await stripe_service.charge(amount=1000, currency="usd")
+        assert result.charge_id == "ch_123"
+
+    # Assert the request was actually made
+    assert respx.calls.last.request.url == "https://api.stripe.com/v1/charges"
+    ```
+- NEVER mock at the SDK function level for HTTP services (e.g. `mocker.patch("stripe.Charge.create")`) — it bypasses serialisation and misses network-level bugs; `respx` tests the full HTTP path

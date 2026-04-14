@@ -322,6 +322,30 @@ Not needed for: GET (already safe), DELETE (already idempotent)
 - NEVER apply the same limit to auth and read endpoints — auth must be stricter
 - NEVER store rate limit counters in-process — they reset on restart and don't share across instances
 
+## PATCH Semantics Edge Cases
+
+- `PATCH {}` (empty body) is a valid no-op — return 200 with unchanged resource; never return 400
+- `{"field": null}` means "set this field to null" — NOT "leave this field unchanged"; use `exclude_unset=True` to distinguish null-as-value from absent-as-unchanged
+- Attempts to PATCH immutable fields (`id`, `created_at`, `user_id`) must be silently ignored — never return 400; strip them in the service layer, not the schema
+- NEVER let PATCH accept `user_id` or `tenant_id` — strip them before processing regardless of what client sends
+
+## Bulk Operations
+
+- Design bulk endpoints as `POST /resource/bulk` with array body — never `POST /resource` with an array (confuses single vs bulk semantics)
+- Return per-item result with status for each item — not a single success/failure for the whole batch:
+    ```json
+    POST /notes/bulk
+    {"items": [{...}, {...}]}
+
+    200 OK
+    {"results": [
+        {"index": 0, "status": "created", "id": 42},
+        {"index": 1, "status": "error", "detail": "title too long"}
+    ]}
+    ```
+- Choose transaction semantics explicitly: all-or-nothing (wrap in one transaction) or best-effort (process each independently, report failures) — document which in OpenAPI description
+- Cap bulk operations at a documented maximum (e.g. 100 items) — return 400 if exceeded
+
 ### slowapi template
 ```python
 from slowapi import Limiter, _rate_limit_exceeded_handler

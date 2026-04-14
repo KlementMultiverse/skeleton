@@ -317,3 +317,33 @@ async def call_llm_guarded(prompt: str) -> str:
         logger.warning("llm_circuit_open")
         raise ExternalServiceError("LLM service temporarily unavailable")
 ```
+
+## Sentry Integration
+
+- Install `sentry-sdk[fastapi]` and initialise in lifespan before anything else runs:
+    ```python
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+
+    sentry_sdk.init(
+        dsn=os.environ["SENTRY_DSN"],
+        integrations=[FastApiIntegration(), SqlalchemyIntegration()],
+        traces_sample_rate=0.1,   # 10% of requests — adjust by traffic volume
+        environment=os.environ.get("ENV", "development"),
+    )
+    ```
+- Sentry auto-captures unhandled exceptions and FastAPI request context — no manual `capture_exception()` needed for HTTP errors
+- Set `user` context in auth dependency so Sentry errors show which user was affected:
+    ```python
+    sentry_sdk.set_user({"id": str(user.id), "email": user.email})
+    ```
+- NEVER set `traces_sample_rate=1.0` in production for high-traffic services — Sentry charges per event; 0.05–0.1 is typical
+
+## Alerting Thresholds
+
+- Alert PagerDuty/Slack when: error rate (5xx / total) exceeds 1% over 5 minutes
+- Alert when any `CRITICAL` log line appears — these should be rare and always actionable
+- Alert when circuit breaker transitions to OPEN — means an external service is down
+- Alert when P99 response latency exceeds 10s for 2 consecutive minutes
+- NEVER alert on every 4xx — client errors are noise; only alert on patterns (e.g. sudden spike in 401s suggesting token issue)

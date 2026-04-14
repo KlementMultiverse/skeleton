@@ -100,3 +100,62 @@ paths: ["*.py", "app/**/*.py", "schemas/**/*.py"]
 - `database-patterns.md` — how to use `model_dump(exclude_unset=True)` with setattr loop in PATCH routes
 - `auth-patterns.md` — password validation with `@model_validator`
 - `security.md` — mass assignment prevention (separate input/output schemas)
+
+## SecretStr — Sensitive Fields
+
+29. Use `SecretStr` for passwords, API keys, tokens, and any field that must not appear in logs or repr:
+    ```python
+    from pydantic import SecretStr
+
+    class Settings(BaseModel):
+        database_url: SecretStr
+        anthropic_api_key: SecretStr
+
+    # repr shows SecretStr('**********') — key never leaks to logs
+    # Access actual value only when needed: settings.anthropic_api_key.get_secret_value()
+    ```
+30. NEVER use `str` for credentials in settings models — a plain `str` will be logged in full on any debug print, exception traceback, or Sentry breadcrumb
+
+## Mutable Defaults
+
+31. NEVER use a mutable literal as a field default — Pydantic shares the object across instances:
+    ```python
+    # BAD — all instances share the same list
+    class Note(BaseModel):
+        tags: list[str] = []
+
+    # GOOD
+    class Note(BaseModel):
+        tags: list[str] = Field(default_factory=list)
+    ```
+
+## model_rebuild() — Forward References
+
+32. Call `Model.model_rebuild()` after defining all models when you have forward references (circular or mutually-referencing models):
+    ```python
+    class User(BaseModel):
+        posts: list["Post"] = []
+
+    class Post(BaseModel):
+        author: User
+
+    User.model_rebuild()  # resolves the "Post" forward reference
+    ```
+33. FastAPI calls `model_rebuild()` automatically for response models — only call it manually in non-FastAPI code or when you define models in separate modules
+
+## AliasGenerator — API Naming Conventions
+
+34. Use `AliasGenerator` to auto-convert snake_case Python fields to camelCase JSON without decorating every field:
+    ```python
+    from pydantic import ConfigDict, AliasGenerator
+    from pydantic.alias_generators import to_camel
+
+    class NoteResponse(BaseModel):
+        model_config = ConfigDict(
+            alias_generator=AliasGenerator(serialization_alias=to_camel),
+            populate_by_name=True,
+        )
+        created_at: datetime   # serializes as "createdAt" in JSON output
+        is_pinned: bool        # serializes as "isPinned"
+    ```
+35. Use `validation_alias` + `serialization_alias` separately when input and output naming conventions differ (e.g., external API sends `snake_case` but your client expects `camelCase`)

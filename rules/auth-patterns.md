@@ -90,3 +90,39 @@ paths: ["*.py", "main.py", "auth.py", "app/**/*.py"]
 36. NEVER reuse a JWT `jti` — it must be unique per token (use uuid4)
 37. Add `iss` (issuer) claim to JWT and validate it — prevents tokens from other services being accepted
 38. On account email change: re-verify the new email AND invalidate all existing tokens
+
+## JWT aud Claim
+
+39. Add `aud` (audience) claim to all JWTs and validate it on decode — prevents a token issued for Service A from being accepted by Service B:
+    ```python
+    # Encode
+    payload = {"sub": user_id, "iss": "my-api", "aud": "my-api", "exp": ...}
+
+    # Decode — rejects token if aud doesn't match
+    decoded = jwt.decode(token, SECRET, algorithms=["HS256"], audience="my-api")
+    ```
+40. NEVER skip `aud` validation in multi-service architectures — without it, a compromised token from any service works everywhere
+
+## Concurrent Session Limits
+
+41. Enforce a maximum number of active refresh tokens per user — revoke the oldest when the limit is exceeded:
+    ```python
+    MAX_SESSIONS = 5
+
+    async def create_session(user_id: str, db: AsyncSession) -> str:
+        count = await db.scalar(
+            select(func.count()).where(RefreshToken.user_id == user_id, RefreshToken.revoked == False)
+        )
+        if count >= MAX_SESSIONS:
+            # Revoke the oldest
+            oldest = await db.scalar(
+                select(RefreshToken)
+                .where(RefreshToken.user_id == user_id, RefreshToken.revoked == False)
+                .order_by(RefreshToken.created_at.asc())
+            )
+            oldest.revoked = True
+        new_token = RefreshToken(user_id=user_id, ...)
+        db.add(new_token)
+        return new_token.token
+    ```
+42. NEVER allow unlimited concurrent sessions — an attacker who obtains a refresh token can maintain access indefinitely across all sessions

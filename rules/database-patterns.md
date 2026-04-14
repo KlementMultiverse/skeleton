@@ -98,3 +98,34 @@ paths: ["models.py", "database.py", "db/**/*.py", "app/**/*.py"]
 40. Use `deleted_at: datetime | None` column for soft delete — NEVER physically delete user data unless legally required
 41. Add `WHERE deleted_at IS NULL` to ALL queries — use a base query helper or SQLAlchemy event listener so it's never forgotten
 42. NEVER show soft-deleted records to users — treat them as if they don't exist at the application layer
+
+## returning() — Atomic Read-After-Write
+
+43. Use `.returning(Model)` on INSERT/UPDATE to get the affected row in one round-trip — avoids a redundant SELECT:
+    ```python
+    from sqlalchemy import insert
+
+    stmt = (
+        insert(Note)
+        .values(title=data.title, user_id=user_id)
+        .returning(Note)
+    )
+    result = await session.execute(stmt)
+    note = result.scalar_one()
+    ```
+44. NEVER do `session.add(obj); await session.flush(); await session.refresh(obj)` when `.returning()` achieves the same result atomically in one query
+
+## Connection Pool Monitoring
+
+45. Log a warning when pool utilisation exceeds 80% — silent exhaustion causes cascading timeouts:
+    ```python
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def on_checkout(dbapi_conn, record, proxy):
+        used = engine.pool.checkedout()
+        size = engine.pool.size()
+        if used / size >= 0.8:
+            logger.warning("db_pool_near_exhaustion", checked_out=used, pool_size=size)
+    ```
+46. At 100% pool utilisation all requests queue silently — tune `pool_size` or investigate slow queries holding connections before scaling the pool

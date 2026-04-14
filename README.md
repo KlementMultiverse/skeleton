@@ -26,6 +26,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `security-complete.md` | L12 | OWASP API Top 10, JWT attacks, SSRF, CORS, encryption, RLS, DoS |
 | `performance-patterns.md` | L13 | Profiling, index design, caching, LLM cost, ORJSONResponse, uvloop |
 | `observability-patterns.md` | L14 | Langfuse, LangSmith, cost attribution, RAGAS, LLM-as-judge, OTel |
+| `deployment-patterns.md` | L15 | Docker multi-stage, health checks, Gunicorn, migrations, CI/CD |
 
 ---
 
@@ -44,6 +45,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `security-study-notes.md` | OWASP API Top 10, JWT algorithm confusion, SSRF, encryption, audit logging |
 | `performance-study-notes.md` | Profiling, query optimization, caching strategies, LLM cost, measurement |
 | `llm-observability-study-notes.md` | Langfuse tracing, cost attribution, RAGAS evals, LLM-as-judge, OTel |
+| `production-deployment-study-notes.md` | Docker, health checks, Gunicorn, zero-downtime migrations, CI/CD |
 
 ---
 
@@ -87,6 +89,7 @@ A new version is committed after every learning session or rule update.
 | v0.9.0 | L13 — Performance (profiling, index design, caching, LLM cost/caching, ORJSONResponse, uvloop, 110 rules) |
 | v0.9.6 | L13 final — 146 rules after 6 iterations (pg_stat_statements, nplusone, SKIP LOCKED, keyset pagination, async worker tuning, embedding batch sizing) |
 | v1.0.0 | L14 — LLM Observability (Langfuse, LangSmith, cost attribution, RAGAS, LLM-as-judge, OTel, 135 rules) |
+| v1.1.0 | L15 — Production Deployment (Docker multi-stage, health checks, Gunicorn, zero-downtime migrations, CI/CD, 130 rules) |
 
 ---
 
@@ -100,5 +103,5 @@ Rules files will be added as each level is completed:
 - [x] L12 — Security deep dive (OWASP API Top 10)
 - [x] L13 — Performance (query optimization, caching, LLM cost)
 - [x] L14 — LLM Observability (Langfuse, tracing, evals)
-- [ ] L15 — Production deployment (Docker, health checks, migrations)
+- [x] L15 — Production deployment (Docker, health checks, migrations)
 - [ ] L16 — Senior patterns (ADRs, system design, cost modeling)

@@ -22,6 +22,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `security.md` | cross | Secrets, CORS, SQL injection, SSRF, prompt injection, headers |
 | `anthropic-patterns.md` | L9 | Messages API, streaming, tool use, prompt caching, error hierarchy |
 | `langgraph-patterns.md` | L10 | StateGraph, reducers, checkpointing, HITL, streaming, Send, Command |
+| `rag-patterns.md` | L11 | Embeddings, pgvector, chunking, hybrid search, reranking, RAGAS |
 
 ---
 
@@ -36,6 +37,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `testing-study-notes.md` | Test pyramid, DB fixtures, mocking LLM, vcrpy, coverage |
 | `anthropic-sdk-study-notes.md` | Messages API, tool use loop, streaming, caching, error hierarchy |
 | `langgraph-study-notes.md` | StateGraph, reducers, checkpointing, HITL, streaming, Send, Command |
+| `rag-pgvector-study-notes.md` | Embeddings, chunking, hybrid search, reranking, RAGAS evaluation |
 
 ---
 
@@ -70,6 +72,8 @@ A new version is committed after every learning session or rule update.
 | v0.3.2 | L9 fix — sequential renumber 1–141 (duplicate rule numbers 7, 10, 33, 46–48 corrected) |
 | v0.4.0 | L10 — LangGraph (StateGraph, reducers, checkpointing, HITL, streaming, Send, Command, RetryPolicy) |
 | v0.4.7 | L10 complete — 161 rules: full control design principles, superstep isolation, streaming+HITL, durable agents, reflexion, tool routing, determinism |
+| v0.5.0 | L10 final — 194 rules: compile-once, graceful shutdown, runtime model config, streaming tests, duplicate fix |
+| v0.6.0 | L11 — RAG + pgvector (embeddings, chunking, hybrid search, reranking, RAGAS, 87 rules) |
 
 ---
 
@@ -79,7 +83,7 @@ Rules files will be added as each level is completed:
 
 - [x] L9 — Anthropic SDK (LLM calls, streaming, tool use, prompt caching)
 - [x] L10 — LangGraph (stateful agents, checkpointing, HITL)
-- [ ] L11 — RAG + pgvector (embeddings, hybrid search, reranking)
+- [x] L11 — RAG + pgvector (embeddings, hybrid search, reranking)
 - [ ] L12 — Security deep dive (OWASP API Top 10)
 - [ ] L13 — Performance (query optimization, caching)
 - [ ] L14 — LLM Observability (Langfuse, tracing, evals)

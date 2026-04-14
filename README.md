@@ -31,6 +31,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `voice-patterns.md` | L17 | Latency budget, audio formats, Ultravox, VAD, telephony, PCI-DSS, GDPR, SLOs |
 | `memory-patterns.md` | L18 | Mem0, Qdrant HNSW, memory layers, injection, extraction, GDPR erasure, multi-agent |
 | `distributed-patterns.md` | L19 | Matrix/Synapse, federation, event DAG, Application Services, event-driven, Kafka, Saga |
+| `tenancy-patterns.md` | L20 | RLS, family/group data, RBAC, invite system, shared AI memory, GDPR, multi-tenancy |
 
 ---
 
@@ -54,6 +55,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `voice-study-notes.md` | Latency budget, audio formats, Ultravox, VAD/barge-in, telephony, production architecture |
 | `ai-memory-study-notes.md` | Memory layers, Mem0 API, Qdrant, injection, extraction, privacy, pgvector vs Qdrant |
 | `distributed-systems-study-notes.md` | CAP/PACELC, Raft, Matrix protocol, Synapse, AS integration, event sourcing, Kafka |
+| `multi-user-tenancy-study-notes.md` | Tenancy models, RLS deep dive, family data model, RBAC, invites, shared AI memory |
 
 ---
 
@@ -102,6 +104,7 @@ A new version is committed after every learning session or rule update.
 | v1.3.0 | L17 — Real-Time Voice (latency budget, Ultravox, VAD, telephony, PCI-DSS, GDPR, SLOs, 199 rules) |
 | v1.4.0 | L18 — AI Memory (Mem0, Qdrant HNSW, memory layers, injection, extraction, GDPR erasure, multi-agent, 159 rules) |
 | v1.5.0 | L19 — Distributed Systems (Matrix/Synapse, federation, event DAG, AS integration, Kafka, Saga, CQRS, 166 rules) |
+| v1.6.0 | L20 — Multi-User Family Tenancy (RLS, family data model, RBAC, invite system, shared AI memory, GDPR, 158 rules) |
 
 ---
 
@@ -120,3 +123,4 @@ Rules files will be added as each level is completed:
 - [x] L17 — Real-time voice (Ultravox, WebRTC, latency budgets, telephony)
 - [x] L18 — AI Memory (Mem0, Qdrant, memory layers, injection, GDPR erasure)
 - [x] L19 — Distributed Systems (Matrix/Synapse, federation, event DAG, Kafka, Saga)
+- [x] L20 — Multi-User Family Tenancy (RLS, family data model, RBAC, invite system, shared AI memory)

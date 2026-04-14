@@ -857,3 +857,118 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
      ```
 142. Key callback events for agents: `on_llm_start`, `on_llm_end`, `on_llm_error`, `on_tool_start`, `on_tool_end`, `on_tool_error`, `on_chain_start`, `on_chain_end`
 143. NEVER do blocking I/O in `BaseCallbackHandler` methods — use `AsyncCallbackHandler` for any async operations (DB writes, HTTP calls); sync handlers block the event loop
+
+## What Makes LangGraph Exceptional (Design Principles)
+
+144. LangGraph's core value over a plain `while True:` loop: **Durable** (survives process crashes), **Observable** (every step traced), **Controllable** (pause at any point), **Resumable** (any checkpoint → continue from there), **Debuggable** (time-travel replay), **Parallelizable** (supersteps) — these are not add-ons, they are the design
+145. LangGraph is NOT an LLM framework — it is a **graph execution engine**. The LLM is just one kind of node. You can build workflows with zero LLM calls and LangGraph still provides all guarantees.
+146. The checkpointer is what transforms an agent from a **disposable process** into a **persistent entity** — with a checkpointer, a thread is a long-lived identity that can be paused for days and resumed exactly where it left off
+147. LangGraph enforces **explicit control flow** — unlike ReAct/AgentExecutor (black box), every routing decision is your code, every state transition is visible, every failure is recoverable. This is what "full control" means.
+
+## Superstep State Isolation (Critical Correctness Rule)
+
+148. **All parallel nodes in a superstep receive the state BEFORE that superstep started** — parallel nodes cannot see each other's writes until the NEXT step:
+     ```
+     State before superstep: {count: 0}
+     node_a runs → returns {count: 1}   ←── both nodes started from count=0
+     node_b runs → returns {count: 1}   ←── NOT count=2, they don't see each other
+     After superstep: reducers merge → {count: 2}  (if using operator.add)
+     ```
+149. This isolation is intentional — it makes parallel execution deterministic and prevents race conditions; design your state reducers to merge parallel writes correctly (operator.add, not replace)
+
+## Streaming + HITL Combined
+
+150. When `interrupt()` fires during a streaming run, the stream emits the interrupt event and pauses — clients must detect this and surface it to the user:
+     ```python
+     async for chunk in graph.astream(input, config, stream_mode="updates"):
+         if "__interrupt__" in chunk:
+             # Graph is paused — surface interrupt to user
+             interrupt_value = chunk["__interrupt__"][0].value
+             user_decision = await get_human_input(interrupt_value)
+             # Resume — pass the decision back
+             async for resume_chunk in graph.astream(
+                 Command(resume=user_decision),
+                 config,
+                 stream_mode="updates",
+             ):
+                 yield resume_chunk
+             break  # break the outer loop — resume_chunk loop handles rest
+         else:
+             yield chunk
+     ```
+151. NEVER discard `__interrupt__` chunks in streaming — if you filter them out, the agent appears hung to the client and the interrupt is never resolved
+
+## Durable Long-Running Agent Pattern
+
+152. Design long-running agents (minutes to hours) as durable runs: start the run, store the `thread_id`, return to the client immediately, let the agent run in the background, poll or stream results later:
+     ```python
+     # Start — returns immediately
+     @app.post("/agents/start")
+     async def start_agent(request: AgentRequest):
+         thread_id = str(uuid4())
+         asyncio.create_task(
+             graph.ainvoke(
+                 {"task": request.task},
+                 {"configurable": {"thread_id": thread_id}, "recursion_limit": 200}
+             )
+         )
+         return {"thread_id": thread_id, "status": "running"}
+
+     # Poll state
+     @app.get("/agents/{thread_id}/state")
+     async def get_agent_state(thread_id: str):
+         config = {"configurable": {"thread_id": thread_id}}
+         snapshot = graph.get_state(config)
+         return {"values": snapshot.values, "next": snapshot.next}
+     ```
+153. Durable agents require `AsyncPostgresSaver` — `InMemorySaver` is lost if the background task's process restarts
+154. Set `recursion_limit` high for long-running agents (100-500) — the default 25 is for short interactive agents
+
+## Reflexion — Self-Correction Loop
+
+155. The reflexion pattern: agent generates output → evaluator scores it → if quality below threshold, regenerate with feedback — implement as a conditional edge:
+     ```python
+     class ReflexionState(TypedDict):
+         task: str
+         draft: str
+         critique: str
+         iteration: int
+
+     def evaluate(state: ReflexionState) -> dict:
+         score = evaluator_chain.invoke({"draft": state["draft"]})
+         return {"critique": score.critique, "iteration": state["iteration"] + 1}
+
+     def should_revise(state: ReflexionState) -> Literal["revise", "__end__"]:
+         if state["iteration"] >= 3:       # max iterations guard — REQUIRED
+             return END
+         if "APPROVED" in state["critique"]:
+             return END
+         return "revise"
+
+     builder.add_conditional_edges("evaluate", should_revise)
+     ```
+156. ALWAYS add a max iterations guard to reflexion loops — an evaluator that never gives APPROVED will loop forever; `iteration >= N` → force END
+
+## Routing Based on Tool Output Content
+
+157. After `ToolNode` runs, inspect `ToolMessage` content to route to different nodes — not just whether a tool was called, but what it returned:
+     ```python
+     def route_on_tool_result(state: MessagesState) -> Literal["handle_error", "handle_success", "agent"]:
+         last = state["messages"][-1]
+         if not hasattr(last, "tool_call_id"):
+             return "agent"  # not a tool result — back to agent
+         if last.status == "error":
+             return "handle_error"
+         if "not found" in last.content.lower():
+             return "handle_not_found"
+         return "agent"  # success — let agent continue
+
+     builder.add_conditional_edges("tools", route_on_tool_result)
+     ```
+158. `ToolMessage.status` is `"success"` or `"error"` — `ToolNode` sets this automatically based on whether the tool raised an exception
+
+## Determinism and Predictability
+
+159. Use `temperature=0` on all LLM calls inside routing/classification nodes — routing decisions must be deterministic; non-zero temperature introduces random branching
+160. Use structured output (`model.with_structured_output(Schema)`) for all routing nodes — free text routing ("go to node_a") fails on slight phrasing variations; typed output (`Literal["node_a", "node_b"]`) never fails
+161. Document every conditional edge with a comment explaining the exact routing logic — conditional edges are the most common source of agent behavior bugs; make intent explicit

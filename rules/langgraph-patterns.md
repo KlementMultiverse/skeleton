@@ -483,3 +483,75 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
 103. Use a unique `thread_id` per test — shared `thread_id` across tests will accumulate state and cause flaky tests
 104. Mock LLM calls at the `ChatAnthropic` or `AsyncAnthropic` level, not at HTTP level — same pattern as `anthropic-patterns.md` rule for testing
 105. Test HITL flows by asserting on `snapshot.next` after the first `invoke()` call, then calling `invoke(Command(resume=...), config)` and asserting on the final state
+
+## Recursion Limit
+
+106. LangGraph's default recursion limit is **25 steps** — any agent that loops (tool use, supervisor routing, reflection) will raise `GraphRecursionError` if it exceeds this; raise the limit in config:
+     ```python
+     config = {
+         "recursion_limit": 100,          # raise from default 25
+         "configurable": {"thread_id": "..."},
+     }
+     result = graph.invoke(input, config)
+     ```
+107. Catch `GraphRecursionError` explicitly and return a graceful degraded response — never let it surface as an unhandled 500:
+     ```python
+     from langgraph.errors import GraphRecursionError
+
+     try:
+         result = await graph.ainvoke(input, config)
+     except GraphRecursionError:
+         return {"messages": [AIMessage("I couldn't complete this in the allowed steps.")]}
+     ```
+108. Use `graph.with_config({"recursion_limit": 100})` to set a default limit on the compiled graph so you don't have to pass it on every `invoke()` call
+
+## model.bind_tools() — Giving the LLM Tool Awareness
+
+109. Call `model.bind_tools(tools)` on the LangChain model BEFORE using it in a node — without this the model has no knowledge of tools, generates no `tool_calls`, and `tools_condition` always routes to `END`:
+     ```python
+     from langchain_anthropic import ChatAnthropic
+
+     tools = [get_weather, search_web]
+     model = ChatAnthropic(model="claude-sonnet-4-6")
+     model_with_tools = model.bind_tools(tools)   # bind ONCE, reuse
+
+     async def call_model(state: MessagesState) -> dict:
+         response = await model_with_tools.ainvoke(state["messages"])
+         return {"messages": response}
+
+     tool_node = ToolNode(tools)  # same tools list
+
+     builder.add_node("agent", call_model)
+     builder.add_node("tools", tool_node)
+     builder.add_conditional_edges("agent", tools_condition)
+     builder.add_edge("tools", "agent")
+     ```
+110. `model.bind_tools(tools)` and `ToolNode(tools)` must use the SAME tools list — if they differ, the model may request a tool that `ToolNode` doesn't know how to execute
+
+## RemoveMessage — Deleting Messages from History
+
+111. Use `RemoveMessage` to delete a specific message from the `add_messages` list by its `id` — the only way to remove a message once it's in state:
+     ```python
+     from langchain_core.messages import RemoveMessage
+
+     def prune_history(state: MessagesState) -> dict:
+         # Remove all messages except the last 10
+         messages_to_delete = state["messages"][:-10]
+         return {"messages": [RemoveMessage(id=m.id) for m in messages_to_delete]}
+     ```
+112. `RemoveMessage` works because `add_messages` checks: if a message with the same `id` is a `RemoveMessage`, it deletes the existing one instead of appending
+113. NEVER delete the most recent `HumanMessage` or any `ToolMessage` that has a pending `tool_use_id` — the LLM will error on missing tool results
+
+## SQLite Checkpointer (Dev with File Persistence)
+
+114. Use `AsyncSqliteSaver` for local development when you want persistence across process restarts without running PostgreSQL:
+     ```python
+     # pip install langgraph-checkpoint-sqlite aiosqlite
+     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+     async with AsyncSqliteSaver.from_conn_string("./agent_state.db") as checkpointer:
+         await checkpointer.setup()
+         graph = builder.compile(checkpointer=checkpointer)
+         result = await graph.ainvoke(input, config)
+     ```
+115. Checkpointer hierarchy: `InMemorySaver` (no persistence) → `AsyncSqliteSaver` (file, single process) → `AsyncPostgresSaver` (production, multi-process)

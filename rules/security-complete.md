@@ -303,3 +303,93 @@ paths: ["**"]
 104. NEVER issue a full session token until ALL authentication factors are verified — use a short-lived, capability-limited "pending MFA" token between credential verification and OTP verification, and exchange it for a full session only on OTP success; pre-issuing a full session before 2FA verification allows bypassing the second factor entirely.
 
 105. ALWAYS use `SameSite=Strict` for session cookies on APIs serving a decoupled SPA on a different origin — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.
+
+---
+
+## Password Hashing
+
+106. ALWAYS use Argon2id for new password hashing implementations — minimum config: 64 MiB memory, 3 iterations, 1 degree of parallelism (`argon2-cffi` in Python). bcrypt silently truncates passwords beyond 72 bytes, making it unsuitable for modern auth; use Argon2id as the OWASP 2025 mandatory default.
+
+107. IF bcrypt is already deployed and migration is not feasible, enforce a 72-byte maximum password length at the input validation layer and set work factor >= 12 — the 72-byte truncation is silent and allows passwords like "correct horse battery staple..." to match any suffix.
+
+---
+
+## OAuth2 / PKCE Security
+
+108. ALWAYS require PKCE (RFC 7636) for all authorization code flows — use `code_challenge_method=S256` only; never accept `plain`. Never use the implicit flow; it exposes tokens in the browser URL fragment.
+
+109. ALWAYS validate `redirect_uri` with exact string matching against a pre-registered allowlist — never use prefix matching or wildcard subdomains; one open redirect in the allowlist compromises the entire OAuth flow (RFC 9700).
+
+110. ALWAYS generate the `state` parameter with `secrets.token_urlsafe(32)` and bind it to the user session before the authorization redirect — verify it on callback before exchanging the code; a missing or guessable `state` enables CSRF against the OAuth flow.
+
+---
+
+## WebSocket Security
+
+111. ALWAYS validate the `Origin` header during the WebSocket upgrade handshake and reject connections from origins not on your CORS allowlist — WebSocket upgrades are sent with cookies but without CORS preflight, making them vulnerable to cross-site WebSocket hijacking (CSWSH).
+
+112. ALWAYS validate a token (JWT or CSRF token) passed as a query parameter or `Sec-WebSocket-Protocol` subprotocol header during the upgrade — never rely on cookie authentication alone for WebSocket connections.
+
+113. ALWAYS use `wss://` (TLS) exclusively in production; never `ws://` — unencrypted WebSocket traffic exposes session tokens and message payloads to network interception.
+
+---
+
+## GraphQL Security
+
+114. ALWAYS disable GraphQL introspection in production — it exposes your full schema and field inventory to attackers; enable it only in development environments behind authentication.
+
+115. ALWAYS enforce maximum query depth and complexity limits before execution — a single HTTP request can batch thousands of nested GraphQL operations; depth limit of 7 levels and complexity score of 1000 are common production defaults.
+
+116. NEVER rate-limit GraphQL endpoints by HTTP request count alone — one request can contain hundreds of batched operations; rate-limit by operation count per request.
+
+---
+
+## Server-Side Template Injection (SSTI)
+
+117. NEVER pass user-supplied input to `render_template_string()` or any equivalent that compiles a template at runtime from a string — always use static template files on disk; Jinja2 SSTI via `__class__.__mro__` gadget chains leads directly to RCE.
+
+118. IF user-customizable templates are a product requirement, render them in `jinja2.sandbox.SandboxedEnvironment()` with an explicit whitelist of globals and filters — the default `Environment()` gives attackers full Python object traversal.
+
+---
+
+## Business Logic Race Conditions
+
+119. ALWAYS use `SELECT ... FOR UPDATE` (pessimistic locking) or optimistic locking with a version column for any operation that reads a value and writes based on it — balance deductions, inventory decrements, coupon redemptions, and rate limit counters are all vulnerable to TOCTOU (time-of-check-time-of-use) race conditions without this.
+
+120. NEVER check a constraint in application code and then write separately — the check and write must be atomic within a single database transaction; two concurrent requests will both pass the check before either commits.
+
+---
+
+## Container Security
+
+121. ALWAYS run the application as a non-root user in production containers — a root process in a container can escape to the host if the container runtime has a vulnerability; add a non-root user in the Dockerfile and switch to it before the `CMD`.
+
+122. ALWAYS specify a non-latest, digest-pinned base image in production Dockerfiles — `FROM python:3.12.3-slim@sha256:...`; `latest` tags silently pull new images that may introduce vulnerabilities or supply-chain compromises.
+
+123. NEVER mount the Docker socket into a container and NEVER use `--privileged` — mounting the socket gives the container full host control equivalent to root on the host machine.
+
+---
+
+## HTTP Request Smuggling
+
+124. ALWAYS configure your reverse proxy to reject or normalize requests that contain both `Content-Length` and `Transfer-Encoding` headers — this is the root cause of CL.TE and TE.CL request smuggling attacks (CVE-2025-55315).
+
+125. PREFER HTTP/2 end-to-end between load balancer and application server — HTTP/2 does not have the CL/TE ambiguity that makes HTTP/1.1 smuggling possible.
+
+---
+
+## TLS Configuration
+
+126. ALWAYS configure your reverse proxy to reject TLS 1.0 and TLS 1.1 — set `ssl_protocols TLSv1.2 TLSv1.3;` in nginx; PCI-DSS 4.0 (effective April 2024) makes TLS 1.2 the hard minimum.
+
+127. ALWAYS use strong cipher suites: prefer ECDHE+AESGCM and CHACHA20-POLY1305; disable RC4, DES, 3DES, and export-grade ciphers. Verify quarterly with `testssl.sh` — cipher regressions frequently appear after reverse proxy upgrades.
+
+---
+
+## Cryptographic Strength
+
+128. NOTE on rule 88 — Fernet uses AES-128-CBC. For environments requiring AES-256 (FIPS 140-2/3, PCI-DSS), use `cryptography.hazmat.primitives.ciphers.aead.AESGCM` with a 32-byte key instead — AES-GCM provides authenticated encryption and is FIPS-approved. NEVER use AES-CBC without an explicit HMAC; CBC without MAC is vulnerable to padding oracle attacks.
+
+129. ALWAYS generate an SBOM (`syft` or `cyclonedx-bom`) as a CI artifact on every production build — required for EO 14028 compliance and enables rapid triage when a new CVE drops; you can instantly determine if the affected package is in your build without scanning all repos manually.
+
+130. ALWAYS audit DNS CNAMEs for dangling records before enabling HSTS `preload` — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.

@@ -131,6 +131,10 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
 51. Always provide `langgraph.json` manifest — maps graph names to Python objects for the server
 52. Run `checkpointer.setup()` and `store.setup()` in the deploy pipeline, NOT in the server startup hook
 53. NEVER run `alembic upgrade head` and `checkpointer.setup()` inside the same lifespan — keep infra setup out of application code
+54. Use `langgraph build -t my-agent:latest` to create a Docker image of your graph — same API as LangGraph Cloud but self-hosted
+55. LangGraph Studio allows manual state injection at any node — use it to test edge cases by editing state mid-run without rewriting test cases
+56. Background runs via LangGraph Server: `POST /runs` returns `run_id` immediately; poll `GET /runs/{run_id}` for completion — use for long-running agents where clients cannot hold open a connection
+57. LangGraph Cloud auto-scales workers; self-hosted LangGraph Server uses fixed workers — size workers = max concurrent graph runs you need
 
 ## Observability (LangSmith Auto-Tracing)
 
@@ -251,3 +255,84 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
 75. `AIMessage` from LangChain maps to `{"role": "assistant", "content": "..."}` in Anthropic SDK
 76. `ToolMessage` maps to a `tool_result` content block — `tool_use_id` must match
 77. Initialize `AsyncAnthropic` ONCE in lifespan, inject into graph via `Runtime[Context]` or app state — see `anthropic-patterns.md` rule 1
+
+## ToolNode and Tool Execution
+
+78. Use `ToolNode` from `langgraph.prebuilt` for tool execution in custom graphs — handles dispatch, parallel calls, error catching, and `ToolMessage` construction automatically:
+    ```python
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    tools = [get_weather, search_web]
+    tool_node = ToolNode(tools)
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("agent", call_model)
+    builder.add_node("tools", tool_node)
+    builder.add_edge(START, "agent")
+    builder.add_conditional_edges("agent", tools_condition)  # → "tools" if tool_calls, END otherwise
+    builder.add_edge("tools", "agent")                       # loop back after execution
+    ```
+79. `tools_condition` is a prebuilt router that checks `state["messages"][-1].tool_calls` — returns `"tools"` if present, `END` otherwise; use it instead of writing your own
+80. `ToolNode` handles parallel tool calls — if the LLM calls 3 tools in one turn, `ToolNode` executes them concurrently and returns all results
+81. NEVER manually build `ToolMessage` objects when using `ToolNode` — it constructs them automatically; manual construction only needed when bypassing `ToolNode`
+
+## Supervisor Multi-Agent Pattern
+
+82. The supervisor pattern: one LLM routes between specialist subagents, each subagent returns to supervisor after completing:
+    ```python
+    from typing_extensions import Literal
+    from pydantic import BaseModel
+
+    class RouteDecision(BaseModel):
+        next: Literal["researcher", "writer", "FINISH"]
+
+    def supervisor(state: MessagesState) -> Command[Literal["researcher", "writer", "__end__"]]:
+        decision = model.with_structured_output(RouteDecision).invoke(state["messages"])
+        goto = END if decision.next == "FINISH" else decision.next
+        return Command(goto=goto)
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("supervisor", supervisor)
+    builder.add_node("researcher", create_react_agent(model, [search_tool]))
+    builder.add_node("writer", create_react_agent(model, [write_tool]))
+    builder.add_edge(START, "supervisor")
+    builder.add_edge("researcher", "supervisor")  # always return to supervisor
+    builder.add_edge("writer", "supervisor")
+    ```
+83. Supervisor MUST eventually route to `END` — without a FINISH condition and max_iterations guard the supervisor loops forever
+
+## Node Failure Recovery
+
+84. When a node raises an unhandled exception: graph execution stops AND the checkpointer preserves all state up to that point — no completed work is lost
+85. Recover from a failed node without losing progress:
+    ```python
+    # Inspect state at failure point
+    snapshot = graph.get_state(config)
+    print(snapshot.values)  # what state looked like when node failed
+    print(snapshot.next)    # which node was running
+
+    # Fix: update state to bypass bad input, then resume
+    graph.update_state(config, {"bad_field": "fixed value"}, as_node="failed_node")
+    graph.invoke(None, config)  # continues from that node with fixed state
+
+    # Or: fix the code, redeploy — the checkpoint is still there, resume works
+    graph.invoke(None, config)
+    ```
+86. NEVER run production agents without a checkpointer — an unchecked node failure with no checkpointer loses all progress and there is no recovery path
+
+## Graph Visualization
+
+87. Visualize graph structure during development to catch missing edges and verify routing logic:
+    ```python
+    # In Jupyter notebook
+    from IPython.display import Image, display
+    display(Image(graph.get_graph().draw_mermaid_png()))
+
+    # Save to file
+    with open("graph.png", "wb") as f:
+        f.write(graph.get_graph().draw_mermaid_png())
+
+    # Print Mermaid source (no image dependency)
+    print(graph.get_graph().draw_mermaid())
+    ```
+88. Use `xray=True` to expand subgraph internals: `graph.get_graph(xray=True).draw_mermaid_png()`

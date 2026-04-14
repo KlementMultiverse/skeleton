@@ -34,6 +34,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `tenancy-patterns.md` | L20 | RLS, family/group data, RBAC, invite system, shared AI memory, GDPR, multi-tenancy |
 | `aws-patterns.md` | L21 | IAM Identity Center, CDK v2, ECS Fargate Graviton4, Aurora Serverless v2, Valkey, Bedrock Converse API, awslabs MCPs |
 | `gcp-patterns.md` | L22 | IAM/WIF, Cloud Run Gen2, AlloyDB AI, Vertex AI Gemini 2.0, Pub/Sub, Terraform CFT, GCP MCP servers |
+| `azure-patterns.md` | L23 | Managed Identity, Container Apps, Azure OpenAI, PostgreSQL Flexible, Cosmos DB, Service Bus, Bicep, Azure MCP |
 
 ---
 
@@ -60,6 +61,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `multi-user-tenancy-study-notes.md` | Tenancy models, RLS deep dive, family data model, RBAC, invites, shared AI memory |
 | `aws-study-notes.md` | IAM Identity Center, CLI v2/SSO, CDK v2 Pipelines, compute selection, Bedrock Converse API, cross-region inference, awslabs MCPs |
 | `gcp-study-notes.md` | gcloud CLI/ADC, Cloud Run Gen2, AlloyDB AI pgvector, Vertex AI Gemini 2.0 Flash, Pub/Sub, Terraform, GCP MCP servers |
+| `azure-study-notes.md` | az CLI, Container Apps, Azure OpenAI GPT-4o/o3/o4-mini, PostgreSQL Flexible Server, Cosmos DB, Service Bus, Bicep, Azure MCP |
 
 ---
 
@@ -111,6 +113,7 @@ A new version is committed after every learning session or rule update.
 | v1.6.0 | L20 — Multi-User Family Tenancy (RLS, family data model, RBAC, invite system, shared AI memory, GDPR, 158 rules) |
 | v1.7.0 | L21 — AWS (IAM Identity Center, CDK v2 Pipelines, ECS Fargate Graviton4, Aurora Serverless v2, Valkey, Bedrock Converse API, cross-region inference, awslabs MCP servers, 227 rules) |
 | v1.8.0 | L22 — GCP (Workload Identity Federation, Cloud Run Gen2, AlloyDB AI, Vertex AI Gemini 2.0 Flash, Pub/Sub, Terraform CFT, GCP MCP servers, 205 rules) |
+| v1.9.0 | L23 — Azure (Managed Identity, Container Apps, Azure OpenAI GPT-4o/o3/o4-mini, PostgreSQL Flexible Server, Cosmos DB, Service Bus, Bicep, Azure MCP, 231 rules) |
 
 ---
 
@@ -132,4 +135,4 @@ Rules files will be added as each level is completed:
 - [x] L20 — Multi-User Family Tenancy (RLS, family data model, RBAC, invite system, shared AI memory)
 - [x] L21 — AWS (IAM Identity Center, CDK v2 Pipelines, ECS Fargate Graviton4, Aurora Serverless v2, Valkey, Bedrock Converse API, awslabs MCPs)
 - [x] L22 — GCP (gcloud CLI/WIF, Vertex AI Gemini 2.0, Cloud Run Gen2, AlloyDB AI, Pub/Sub, Terraform CFT, GCP MCPs)
-- [ ] L23 — Azure (az CLI, Azure OpenAI, Container Apps, Blob Storage, Service Bus, Cosmos DB, Terraform, Azure MCPs)
+- [x] L23 — Azure (az CLI/Managed Identity, Azure OpenAI GPT-4o/o3/o4-mini, Container Apps, Cosmos DB, Service Bus, Bicep, Azure MCPs)

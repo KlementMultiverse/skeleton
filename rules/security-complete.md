@@ -598,4 +598,38 @@ paths: ["**"]
 
 180. ALWAYS set an explicit, allowlisted `Content-Type` on every response that serves user-generated content — default to `Content-Disposition: attachment; filename="download"` and `Content-Type: application/octet-stream` for unknown types; forcing download prevents the browser from rendering attacker-controlled content as HTML or script.
 
-181. NEVER rely on magic bytes alone to reject malicious uploads — polyglot files are simultaneously valid in two formats (e.g. a JPEG that is also valid JavaScript); run the uploaded content through a format-specific strict parser (not just a magic-byte check) and reject files that parse successfully as any non-allowed format. (`X-User-ID`, `X-Tenant-ID`, `X-Authenticated-User`) without verifying they originated from your own trusted gateway — the application MUST re-verify the JWT on every request regardless of gateway validation, OR MUST enforce network policy (firewall / Kubernetes NetworkPolicy) that allows traffic to the app port ONLY from the gateway's IP range; "gateway does auth, app trusts the header" without network-layer enforcement allows any internal-network attacker to forge identity. — escape all input with `ldap3.utils.conv.escape_filter_chars()` before it appears in a filter; ALWAYS disable referral chasing (`AUTO_REFERRALS=False`) to prevent LDAP referral injection redirecting auth to an attacker-controlled server. — a CNAME pointing to an unclaimed S3 bucket, GitHub Pages, or Heroku app allows subdomain takeover; under HSTS preload, the attacker's endpoint is served with your domain's HTTPS trust. Run `subjack` or `nuclei -t takeovers/` in CI against your full DNS zone. — `SameSite=Lax` still sends the cookie on top-level navigations (e.g., cross-site link clicks that trigger GET requests); `Strict` prevents this; reserve `Lax` only when the application requires cookie delivery on incoming navigations from external links, and document the reason.
+181. NEVER rely on magic bytes alone to reject malicious uploads — polyglot files are simultaneously valid in two formats (e.g. a JPEG that is also valid JavaScript); run the uploaded content through a format-specific strict parser (not just a magic-byte check) and reject files that parse successfully as any non-allowed format.
+
+---
+
+## Threat Modeling
+
+182. ALWAYS produce a STRIDE threat model for any feature that introduces a new authentication flow, new data store, new cross-tenant data path, or new third-party integration — before writing any implementation code. Document at minimum: Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, and Elevation of privilege paths. The threat model is a gate artifact; implementation does not start until threats are documented and mitigations are assigned.
+
+---
+
+## HTTP/3 and QUIC Security
+
+183. IF you enable TLS 1.3 early data (0-RTT) or deploy over HTTP/3 (QUIC), NEVER process non-idempotent requests (POST, PUT, PATCH, DELETE) when the `Early-Data: 1` request header is present — respond with `425 Too Early` (RFC 8470) instead; 0-RTT data can be replayed by a network attacker. Disable 0-RTT at the reverse proxy layer (`ssl_early_data off` in nginx) unless every endpoint has been audited for replay safety.
+
+---
+
+## Data Erasure and GDPR
+
+184. ALWAYS implement cryptographic erasure for PII stored in encrypted fields — derive a per-user DEK from a master key, store the DEK in a secret manager keyed by `user_id`; on an erasure request, delete the DEK from the secret manager. After TTL expiry the ciphertext is unrecoverable without modifying backup files or audit logs.
+
+185. ALWAYS document and enforce a maximum backup retention period as a security control — it defines the outer bound of your erasure SLA; any backup older than the retention period must be automatically purged; manual deletion processes are insufficient under operational load.
+
+---
+
+## API Key Scoping
+
+186. ALWAYS issue API keys with an explicit, minimal scope list — never issue full-account keys by default; the scope list is stored server-side and verified on every request; the key itself encodes no permissions.
+
+187. ALWAYS set a maximum TTL on every API key — 1 year maximum for user-generated keys, 90 days for service-to-service keys; emit a `SecurityEvent` audit entry containing issuing `user_id`, key prefix (first 8 characters only), granted scopes, and expiry timestamp at key creation time.
+
+---
+
+## Penetration Testing Authorization
+
+188. NEVER run automated scanning tools (ZAP, Burp, sqlmap, nmap, nuclei), brute-force tests, or fuzzing against a production system without: (1) written authorization from the system owner naming the specific tools and scope, (2) a maintenance window coordinated with ops, (3) a rollback plan if the scan triggers an outage or WAF ban. Running a scan from a development laptop against a live production URL without these prerequisites is unauthorized access under CFAA (US) and Computer Misuse Act (UK) regardless of employment relationship.

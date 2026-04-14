@@ -543,3 +543,142 @@ paths: ["*.py", "app/**/*.py", "main.py"]
 111. A2A task states: `working` → `completed` | `failed` | `input_required` | `canceled`
 112. Use A2A when you need: cross-framework agent calls, published agent services, multi-company agent pipelines
 113. There is NO Anthropic SDK native A2A integration — wrap the Messages API yourself in an A2A handler
+
+## tool_choice — Controlling Tool Selection
+
+114. Use `tool_choice` to control whether and how Claude uses tools:
+     ```python
+     # Default — Claude decides whether to use a tool
+     tool_choice={"type": "auto"}
+
+     # Force Claude to call at least one tool (any tool from the list)
+     tool_choice={"type": "any"}
+
+     # Force a specific tool by name — Claude MUST call it
+     tool_choice={"type": "tool", "name": "get_weather"}
+     ```
+115. Force one tool at a time — prevent parallel calls with `disable_parallel_tool_use`:
+     ```python
+     tool_choice={"type": "auto", "disable_parallel_tool_use": True}
+     ```
+116. `disable_parallel_tool_use=True` makes Claude call one tool per turn — use when tool order matters or each call mutates shared state
+117. `tool_choice={"type": "any"}` is useful for structured extraction: force Claude to always return data via a tool schema instead of free text
+118. NEVER use `tool_choice={"type": "tool", ...}` in a loop without checking `stop_reason` — if Claude has nothing to call the tool with, it will error
+
+## PDF Document Inputs
+
+119. Pass PDFs as `document` content blocks — separate from images, separate from Files API:
+     ```python
+     import base64
+
+     # From local file (base64)
+     with open("report.pdf", "rb") as f:
+         data = base64.standard_b64encode(f.read()).decode("utf-8")
+     messages=[{"role": "user", "content": [
+         {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}},
+         {"type": "text", "text": "Summarize the key findings in this report"}
+     ]}]
+
+     # From URL
+     messages=[{"role": "user", "content": [
+         {"type": "document", "source": {"type": "url", "url": "https://example.com/report.pdf"}},
+         {"type": "text", "text": "Extract all action items"}
+     ]}]
+
+     # From Files API (upload once, reference many times)
+     messages=[{"role": "user", "content": [
+         {"type": "document", "source": {"type": "file", "file_id": file_id}},
+         {"type": "text", "text": "Find all budget figures"}
+     ]}]
+     ```
+120. PDFs count toward the same 1M context window — a 100-page PDF ≈ 50k–100k tokens
+121. Max image media types (jpeg/png/gif/webp) are different from document media type (`application/pdf`) — use correct type for each
+122. For repeated PDF analysis across many requests, always use Files API (upload once, save re-upload cost every call)
+
+## Prefilling Assistant Turns
+
+123. Prefill the assistant turn to force output format or continuation:
+     ```python
+     messages = [
+         {"role": "user", "content": "Extract the city from: 'John visited Paris last week'"},
+         {"role": "assistant", "content": '{"city": "'},  # Claude continues from here
+     ]
+     response = await client.messages.create(
+         model="claude-sonnet-4-6",
+         max_tokens=50,
+         messages=messages,
+     )
+     # response.content[0].text will be: Paris"}
+     ```
+124. Prefilling is useful for: forcing JSON output, forcing specific response structure, continuing mid-sentence
+125. **NOT supported on `claude-opus-4-6`** — prefilling assistant messages causes an error on Opus 4.6
+126. NEVER use prefilling in production to bypass safety behaviors — it is for format control only
+
+## Agent Skills (beta)
+
+127. Agent Skills are bundled capabilities (instructions + scripts + resources) Claude loads dynamically (beta `skills-2025-10-02`):
+     ```python
+     # With Managed Agents — attach at agent creation
+     agent = client.beta.agents.create(
+         name="Document Processor",
+         model="claude-sonnet-4-6",
+         system="Process office documents.",
+         tools=[{"type": "agent_toolset_20260401"}],
+         skills=["excel-20251002", "pdf-20251002", "powerpoint-20251002"],
+     )
+
+     # With standalone Messages API
+     response = client.beta.messages.create(
+         model="claude-sonnet-4-6",
+         max_tokens=4096,
+         betas=["skills-2025-10-02"],
+         tools=[{"type": "code_execution_20250522", "name": "code_execution"}],
+         skills=["excel-20251002"],
+         messages=[{"role": "user", "content": "Create a monthly sales report in Excel"}],
+     )
+     ```
+128. Built-in Anthropic skills: `excel-20251002`, `powerpoint-20251002`, `word-20251002`, `pdf-20251002`
+129. Skills require `code_execution` tool to be present — they generate and execute code internally
+130. Custom skills uploadable via `/v1/skills` endpoints — bundle your own instructions + scripts as a reusable skill
+
+## Computer Use
+
+131. Computer use lets Claude control a desktop/browser via screenshots and actions (tools: `computer_20250124`, `bash_20250124`, `text_editor_20250429`):
+     ```python
+     tools = [
+         {
+             "type": "computer_20250124",
+             "name": "computer",
+             "display_width_px": 1280,
+             "display_height_px": 800,
+             "display_number": 1,
+         },
+         {"type": "bash_20250124", "name": "bash"},
+         {"type": "text_editor_20250429", "name": "str_replace_based_edit_tool"},
+     ]
+     response = await client.messages.create(
+         model="claude-sonnet-4-6",
+         max_tokens=4096,
+         tools=tools,
+         messages=[{"role": "user", "content": "Open Firefox and search for FastAPI docs"}],
+     )
+     ```
+132. Computer use follows the tool use loop — Claude returns `action` blocks, you execute them and return screenshots:
+     ```python
+     # Claude returns action blocks like:
+     # {"type": "tool_use", "name": "computer", "input": {"action": "screenshot"}}
+     # {"type": "tool_use", "name": "computer", "input": {"action": "left_click", "coordinate": [760, 400]}}
+     # {"type": "tool_use", "name": "computer", "input": {"action": "type", "text": "FastAPI"}}
+
+     # You capture screenshot → base64 encode → return as tool_result with image block
+     tool_results = [{
+         "type": "tool_result",
+         "tool_use_id": block.id,
+         "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": screenshot_b64}}],
+     }]
+     ```
+133. Computer use actions: `screenshot`, `left_click`, `right_click`, `double_click`, `middle_click`, `type`, `key`, `scroll`, `mouse_move`, `cursor_position`, `left_click_drag`
+134. ALWAYS run computer use in an isolated VM or container — NEVER on your host machine (security risk)
+135. `bash_20250124` tool runs shell commands in a persistent session — state is maintained between calls (env vars, working directory)
+136. `text_editor_20250429` uses str_replace for precise file edits — safer than bash redirection for code editing
+137. Computer use is slower and more expensive than tool use — only use when you need to interact with real GUIs that have no API

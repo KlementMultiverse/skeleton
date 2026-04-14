@@ -780,34 +780,209 @@ result = httpx.post("https://other-agent.example.com", json={
 
 ---
 
-## How all 20 concepts connect in the coding agent
+## Concept 21 — tool_choice and disable_parallel_tool_use
+
+**Analogy:** A manager telling an employee "you MUST use the company template for this report" vs "use whatever works." `tool_choice` is how you enforce or relax that constraint.
+
+```python
+# auto (default) — Claude decides
+tool_choice={"type": "auto"}
+
+# any — Claude MUST use at least one tool
+tool_choice={"type": "any"}
+
+# tool — Claude MUST use this specific tool
+tool_choice={"type": "tool", "name": "extract_data"}
+
+# Prevent parallel tool calls — one tool per turn
+tool_choice={"type": "auto", "disable_parallel_tool_use": True}
+```
+
+**When to use each:**
+- `auto` → normal agent use. Claude decides.
+- `any` → structured extraction. Force Claude to always return data via a tool schema instead of prose.
+- `"tool"` → when you need a specific tool invoked unconditionally (e.g., always log via `audit_tool` before proceeding)
+- `disable_parallel_tool_use` → when tools mutate shared state or order matters (e.g., create user → then create profile, not simultaneously)
+
+---
+
+## Concept 22 — PDF Document Inputs
+
+**Analogy:** Handing Claude a printed report vs. reading it aloud. PDFs are documents — a different content type from images and plain text.
+
+```python
+import base64
+
+# Local PDF
+with open("annual_report.pdf", "rb") as f:
+    data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+response = await client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=2048,
+    messages=[{"role": "user", "content": [
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}},
+        {"type": "text", "text": "Extract all budget figures and action items"},
+    ]}]
+)
+
+# Or from a URL
+messages=[{"role": "user", "content": [
+    {"type": "document", "source": {"type": "url", "url": "https://example.com/report.pdf"}},
+    {"type": "text", "text": "Summarize the key findings"},
+]}]
+```
+
+Three source types: `base64`, `url`, `file` (Files API). Use Files API when you'll reference the same PDF in many requests.
+
+A 100-page PDF ≈ 50k–100k tokens. Always count tokens before sending large PDFs.
+
+---
+
+## Concept 23 — Prefilling Assistant Turns
+
+**Analogy:** Filling in the first words of a sentence and asking someone to finish it. The context shapes the continuation.
+
+```python
+messages = [
+    {"role": "user", "content": "Return the city as JSON. Input: 'John visited Paris last week'"},
+    {"role": "assistant", "content": '{"city": "'},  # Claude continues from here
+]
+# Claude will complete: Paris"}
+```
+
+**What it's useful for:**
+- Force JSON output without schema enforcement
+- Force Claude to start inside a code block: `{"content": "```python\n"}`
+- Skip preambles ("Sure, I'd be happy to...") by starting with the actual answer
+
+**Critical limitation:** Prefilling is **NOT supported on `claude-opus-4-6`**. Sending an assistant turn prefix to Opus 4.6 returns an error. Only use with Haiku and Sonnet models.
+
+---
+
+## Concept 24 — Agent Skills (beta)
+
+**Analogy:** Installing a plugin. A skill is a bundled package (instructions + scripts) Claude can activate to gain a specialized capability.
+
+```python
+# With Managed Agents
+agent = client.beta.agents.create(
+    name="Office Document Agent",
+    model="claude-sonnet-4-6",
+    system="Process office documents.",
+    tools=[{"type": "agent_toolset_20260401"}],
+    skills=["excel-20251002", "pdf-20251002", "powerpoint-20251002"],
+)
+
+# With standalone Messages API
+response = client.beta.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    betas=["skills-2025-10-02"],
+    tools=[{"type": "code_execution_20250522", "name": "code_execution"}],
+    skills=["excel-20251002"],
+    messages=[{"role": "user", "content": "Build a sales dashboard in Excel with this data: ..."}],
+)
+```
+
+**Built-in Anthropic skills:** `excel-20251002`, `powerpoint-20251002`, `word-20251002`, `pdf-20251002`
+
+Skills require the `code_execution` tool — they work by generating and running code internally. You can also upload custom skills via `/v1/skills`.
+
+---
+
+## Concept 25 — Computer Use
+
+**Analogy:** Screen sharing with an intern who can actually control your mouse. You show them the screen, they click and type, you see the result.
+
+Computer use gives Claude control of a real desktop GUI via a screenshot → action → screenshot loop.
+
+```python
+tools = [
+    {
+        "type": "computer_20250124",
+        "name": "computer",
+        "display_width_px": 1280,
+        "display_height_px": 800,
+        "display_number": 1,
+    },
+    {"type": "bash_20250124", "name": "bash"},
+    {"type": "text_editor_20250429", "name": "str_replace_based_edit_tool"},
+]
+
+# The loop: Claude requests action → you execute → send screenshot back
+while True:
+    response = await client.messages.create(
+        model="claude-sonnet-4-6", max_tokens=4096,
+        tools=tools, messages=messages,
+    )
+    if response.stop_reason == "end_turn":
+        break
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "computer":
+            # execute the action (click, type, scroll, etc.)
+            screenshot = execute_action(block.input)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": [{"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": screenshot
+                }}],
+            })
+    messages.append({"role": "assistant", "content": response.content})
+    messages.append({"role": "user", "content": tool_results})
+```
+
+**Available actions:** `screenshot`, `left_click`, `right_click`, `double_click`, `type`, `key`, `scroll`, `mouse_move`, `left_click_drag`
+
+**Three tools, three purposes:**
+| Tool | Purpose |
+|---|---|
+| `computer_20250124` | Mouse + keyboard control via screenshots |
+| `bash_20250124` | Shell commands, persistent session (env vars survive between calls) |
+| `text_editor_20250429` | Precise str_replace file edits — safer than bash for code |
+
+**Security:** ALWAYS run in an isolated VM or container. NEVER on your host machine. Claude can execute arbitrary actions on whatever desktop it sees.
+
+**When to use:** Only when the target has no API. If there's an API, use tool use (faster, cheaper, more reliable). Computer use is the last resort for legacy GUIs.
+
+---
+
+## How all 25 concepts connect in the coding agent
 
 ```
 CORE SDK
-1. Client init        → AsyncAnthropic once at startup; max_retries=3; explicit timeout
-2. Messages API       → always check stop_reason (end_turn/tool_use/max_tokens/exceeded)
-3. Tool use loop      → the agent loop — while stop_reason=="tool_use": execute → send back
-4. Streaming          → show output token by token; get_final_message() for usage stats
-5. Token counting     → count before large calls; 90% threshold → truncate middle
-6. Prompt caching     → 1-hour TTL, min 1024 tokens; auto-caching mode available
-7. Structured output  → output_config={"format": {...}} — returns Pydantic-shaped JSON
-8. Error handling     → RETRY: 429/connection/timeout/529. NEVER RETRY: 400/401/403/validation
-9. Context mgmt       → 1M tokens (Sonnet/Opus 4.6); truncate middle; cap codebase at 50k
+1.  Client init        → AsyncAnthropic once at startup; max_retries=3; explicit timeout
+2.  Messages API       → always check stop_reason (end_turn/tool_use/max_tokens/exceeded)
+3.  Tool use loop      → while stop_reason=="tool_use": execute → append → send back
+4.  Streaming          → token by token; get_final_message() for usage stats
+5.  Token counting     → count before large calls; 90% threshold → truncate middle
+6.  Prompt caching     → 1-hour TTL, min 1024 tokens; auto-caching mode available
+7.  Structured output  → output_config={"format": {...}} — returns Pydantic-shaped JSON
+8.  Error handling     → RETRY: 429/connection/timeout/529. NEVER: 400/401/403/validation
+9.  Context mgmt       → 1M tokens (Sonnet/Opus 4.6); truncate middle; cap codebase at 50k
 
 ADVANCED SDK
-10. Ext. thinking     → effort= for Opus 4.6; budget_tokens= for Sonnet; display="omitted"
-11. Vision            → base64 or URL images as content blocks; up to 20 per request
-12. Batches API       → 50% cheaper; 24hr processing; bulk classification / nightly jobs
-13. Files API         → upload once, reference by file_id across many requests (beta)
-14. Server-side tools → GA: web_search, web_fetch, code_execution, memory_tool
+10. Ext. thinking      → effort= for Opus 4.6; budget_tokens= for Sonnet; display="omitted"
+11. Vision             → base64 or URL images as content blocks; up to 20 per request
+12. Batches API        → 50% cheaper; 24hr processing; bulk classification / nightly jobs
+13. Files API          → upload once, reference by file_id across many requests (beta)
+14. Server-side tools  → GA: web_search, web_fetch, code_execution, memory_tool
 
 AGENTIC LAYER
-15. MCP integration   → 6-step flow; Connector for remote; mcp package for STDIO; never print()
-16. Agent SDK         → orchestrator/worker; parallel asyncio.gather; sequential handoffs
-17. Managed Agents    → zero-infra agent hosting; agent+environment+session+events (beta)
-18. Advisor Tool      → executor model + advisor model mid-generation; haiku/sonnet + opus (beta)
+15. MCP integration    → 6-step flow; Connector for remote; mcp package for STDIO; never print()
+16. Agent SDK          → orchestrator/worker; parallel asyncio.gather; sequential handoffs
+17. Managed Agents     → zero-infra hosting; agent+environment+session+events (beta)
+18. Advisor Tool       → executor + advisor model mid-generation; haiku/sonnet + opus (beta)
 19. Tool Search+Compact → defer_loading for large catalogs; compaction for long runs (beta)
-20. A2A Protocol      → wrap Messages API in A2A handler; JSON-RPC 2.0 inter-agent calls
+20. A2A Protocol       → wrap Messages API in A2A handler; JSON-RPC 2.0 inter-agent calls
+
+INPUT / CONTROL
+21. tool_choice        → auto/any/tool/disable_parallel — control when + how tools are called
+22. PDF inputs         → document content block; base64/url/file_id; ~50-100k tokens per PDF
+23. Prefilling         → force output format by starting assistant turn; NOT on Opus 4.6
+24. Agent Skills       → bundled capabilities (excel/pdf/pptx); requires code_execution (beta)
+25. Computer use       → screenshot→action loop; bash+editor tools; ALWAYS in isolated VM
 ```
 
-This is the complete Anthropic SDK + agentic layer of the coding agent.
+This is the complete Anthropic SDK + agentic layer. All 25 concepts. 137 rules.

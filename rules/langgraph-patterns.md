@@ -132,9 +132,122 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
 52. Run `checkpointer.setup()` and `store.setup()` in the deploy pipeline, NOT in the server startup hook
 53. NEVER run `alembic upgrade head` and `checkpointer.setup()` inside the same lifespan — keep infra setup out of application code
 
+## Observability (LangSmith Auto-Tracing)
+
+58. Enable LangSmith tracing with zero code changes — set two env vars, every LangGraph run is auto-traced:
+    ```bash
+    LANGSMITH_TRACING=true
+    LANGSMITH_API_KEY=lsv2_...
+    LANGSMITH_PROJECT=my-agent   # optional — groups runs
+    ```
+59. NEVER skip observability in production LangGraph agents — without it you cannot debug agent failures, see token costs, or trace tool call chains
+60. LangSmith traces every node, every LLM call, every tool call automatically — no `@observe` decorators needed for LangGraph (unlike raw Anthropic SDK usage)
+
+## Context Window Management
+
+61. Use `trim_messages` to keep the messages list within token budget for long-running chat agents:
+    ```python
+    from langchain_core.messages import trim_messages
+
+    def chatbot(state: MessagesState) -> dict:
+        trimmed = trim_messages(
+            state["messages"],
+            max_tokens=50000,
+            strategy="last",           # keep most recent messages
+            token_counter=ChatAnthropic(model="claude-sonnet-4-6"),
+            include_system=True,       # always keep system message
+            allow_partial=False,
+        )
+        response = model.invoke(trimmed)
+        return {"messages": response}
+    ```
+62. NEVER pass unbounded `state["messages"]` to the LLM in a long-running agent — message lists grow unbounded with checkpointer; always trim first
+
+## Input/Output Schema
+
+63. Use `input` and `output` schema parameters on `StateGraph` to restrict what external callers see vs. what nodes share internally:
+    ```python
+    class InputState(TypedDict):
+        question: str          # only this is accepted from external caller
+
+    class OutputState(TypedDict):
+        answer: str            # only this is returned to external caller
+
+    class InternalState(InputState, OutputState):
+        intermediate_result: str   # internal only — nodes can use this
+
+    builder = StateGraph(InternalState, input=InputState, output=OutputState)
+    ```
+64. Use input/output schema for subgraphs with a public API — it makes the interface explicit and prevents leaking internal state to the parent graph
+
+## Functional API (@entrypoint / @task)
+
+65. Use the functional API (`@entrypoint`, `@task`) for simpler linear flows — less boilerplate than StateGraph when you don't need conditional routing or parallel fan-out:
+    ```python
+    from langgraph.func import entrypoint, task
+
+    @task
+    async def call_llm(messages: list) -> str:
+        response = await model.ainvoke(messages)
+        return response.content
+
+    @task
+    async def call_tool(tool_input: dict) -> str:
+        return tool_fn(**tool_input)
+
+    @entrypoint(checkpointer=InMemorySaver())
+    async def pipeline(state: dict) -> dict:
+        result = await call_llm(state["messages"])
+        return {"answer": result}
+    ```
+66. Use `StateGraph` for: conditional routing, parallel fan-out, multi-agent orchestration, HITL
+    Use `@entrypoint/@task` for: sequential pipelines, simple chat loops, tasks without branching
+
+## Production Connection Pooling
+
+67. In production, use `AsyncConnectionPool` for `AsyncPostgresSaver` — share one pool across app components instead of opening a new connection per graph run:
+    ```python
+    from psycopg_pool import AsyncConnectionPool
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    # Create once at lifespan startup — shared across all requests
+    pool = AsyncConnectionPool(
+        conninfo="postgresql://user:pass@localhost:5432/mydb",
+        max_size=20,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
+    )
+    checkpointer = AsyncPostgresSaver(pool)
+    await checkpointer.setup()  # run once in deploy pipeline
+
+    graph = builder.compile(checkpointer=checkpointer)
+    ```
+68. NEVER use `AsyncPostgresSaver.from_conn_string()` with an async context manager in a hot path — it opens and closes a connection per call; use shared pool instead
+
+## Parallel Execution (Supersteps)
+
+69. LangGraph runs nodes in **supersteps**: all nodes scheduled to run at the same time execute in parallel within one superstep, then block until ALL complete before the next superstep starts
+70. Use `max_concurrency` on `compile()` to cap how many nodes run simultaneously — critical when parallel nodes each make LLM calls (rate limit risk):
+    ```python
+    graph = builder.compile(checkpointer=checkpointer, max_concurrency=5)
+    ```
+71. NEVER use `Send` fan-out without `max_concurrency` if workers call external APIs — unbounded parallelism will hit rate limits
+
+## Time-Travel (update_state)
+
+72. Always pass `as_node=` when calling `graph.update_state()` for time-travel — it tells LangGraph which node "made" this update and determines which node runs next:
+    ```python
+    graph.update_state(
+        config,
+        {"feedback": "rejected"},
+        as_node="human_review",   # next node after human_review will run next
+    )
+    graph.invoke(None, config)
+    ```
+73. Without `as_node=`, LangGraph defaults to the last executed node — which is often wrong for HITL scenarios where you want execution to continue from a specific point
+
 ## Anthropic SDK Integration
 
-54. The `messages` state key IS the conversation history — pass it directly to `client.messages.create(messages=[...])`
-55. `AIMessage` from LangChain maps to `{"role": "assistant", "content": "..."}` in Anthropic SDK
-56. `ToolMessage` maps to a `tool_result` content block — `tool_use_id` must match
-57. Initialize `AsyncAnthropic` ONCE in lifespan, inject into graph via `Runtime[Context]` or app state — see `anthropic-patterns.md` rule 1
+74. The `messages` state key IS the conversation history — pass it directly to `client.messages.create(messages=[...])`
+75. `AIMessage` from LangChain maps to `{"role": "assistant", "content": "..."}` in Anthropic SDK
+76. `ToolMessage` maps to a `tool_result` content block — `tool_use_id` must match
+77. Initialize `AsyncAnthropic` ONCE in lifespan, inject into graph via `Runtime[Context]` or app state — see `anthropic-patterns.md` rule 1

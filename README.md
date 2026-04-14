@@ -21,6 +21,7 @@ Every rule file is auto-loaded by Claude Code into any project that matches its 
 | `testing-patterns.md` | L8 | pytest-asyncio, DB fixtures, LLM mocking, vcrpy, coverage |
 | `security.md` | cross | Secrets, CORS, SQL injection, SSRF, prompt injection, headers |
 | `anthropic-patterns.md` | L9 | Messages API, streaming, tool use, prompt caching, error hierarchy |
+| `langgraph-patterns.md` | L10 | StateGraph, reducers, checkpointing, HITL, streaming, Send, Command |
 
 ---
 
@@ -34,6 +35,7 @@ Plain-English explanations of each concept — analogy first, technical detail s
 | `error-handling-study-notes.md` | Exception hierarchy, structured logging, retry, circuit breaker |
 | `testing-study-notes.md` | Test pyramid, DB fixtures, mocking LLM, vcrpy, coverage |
 | `anthropic-sdk-study-notes.md` | Messages API, tool use loop, streaming, caching, error hierarchy |
+| `langgraph-study-notes.md` | StateGraph, reducers, checkpointing, HITL, streaming, Send, Command |
 
 ---
 
@@ -66,6 +68,7 @@ A new version is committed after every learning session or rule update.
 | v0.3.0 | L9 complete — MCP integration, multi-agent SDK, Managed Agents, Advisor Tool, Tool Search, Compaction, A2A |
 | v0.3.1 | L9 final — tool_choice, PDF inputs, prefilling, Agent Skills, Computer Use (25 concepts, 137 rules) |
 | v0.3.2 | L9 fix — sequential renumber 1–141 (duplicate rule numbers 7, 10, 33, 46–48 corrected) |
+| v0.4.0 | L10 — LangGraph (StateGraph, reducers, checkpointing, HITL, streaming, Send, Command, RetryPolicy) |
 
 ---
 
@@ -74,7 +77,7 @@ A new version is committed after every learning session or rule update.
 Rules files will be added as each level is completed:
 
 - [x] L9 — Anthropic SDK (LLM calls, streaming, tool use, prompt caching)
-- [ ] L10 — LangGraph (stateful agents, checkpointing, HITL)
+- [x] L10 — LangGraph (stateful agents, checkpointing, HITL)
 - [ ] L11 — RAG + pgvector (embeddings, hybrid search, reranking)
 - [ ] L12 — Security deep dive (OWASP API Top 10)
 - [ ] L13 — Performance (query optimization, caching)

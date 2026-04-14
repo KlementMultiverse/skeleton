@@ -336,3 +336,150 @@ paths: ["*.py", "app/**/*.py", "agents/**/*.py", "graphs/**/*.py"]
     print(graph.get_graph().draw_mermaid())
     ```
 88. Use `xray=True` to expand subgraph internals: `graph.get_graph(xray=True).draw_mermaid_png()`
+
+## InjectedState and InjectedStore (Tools That Read Graph State)
+
+89. Use `InjectedState` to pass current graph state into a tool function — the injected parameter is hidden from the LLM's tool schema (LLM doesn't see it, ToolNode injects it automatically):
+    ```python
+    from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
+    from langchain_core.tools import tool
+    from typing import Annotated
+
+    @tool
+    def get_user_context(
+        query: str,
+        state: Annotated[dict, InjectedState],  # hidden from LLM schema
+    ) -> str:
+        """Search for relevant context given a query."""
+        user_id = state.get("user_id")
+        return f"Context for user {user_id}: ..."
+
+    tool_node = ToolNode([get_user_context])  # ToolNode injects state automatically
+    ```
+90. Use `InjectedStore` to give tools direct access to the long-term store — the tool can read/write memories without going through node state:
+    ```python
+    from langgraph.store.base import BaseStore
+
+    @tool
+    async def save_preference(
+        preference: str,
+        store: Annotated[BaseStore, InjectedStore],
+        state: Annotated[dict, InjectedState],
+    ) -> str:
+        """Save a user preference to long-term memory."""
+        user_id = state["user_id"]
+        await store.aput(("prefs", user_id), preference[:20], {"data": preference})
+        return f"Saved: {preference}"
+    ```
+91. `InjectedState` and `InjectedStore` ONLY work when calling tools via `ToolNode` — if you call tools manually, you must inject these yourself
+
+## ToolNode Error Handling
+
+92. `ToolNode` catches tool exceptions by default (`handle_tool_errors=True`) and returns the error message as a `ToolMessage` — the LLM sees the error and can retry or route differently:
+    ```python
+    # Default — catches all exceptions, returns error string to LLM
+    tool_node = ToolNode(tools)
+
+    # Disable — exceptions propagate up (triggers RetryPolicy or fails the run)
+    tool_node = ToolNode(tools, handle_tool_errors=False)
+
+    # Custom handler — format the error yourself
+    tool_node = ToolNode(tools, handle_tool_errors=lambda e: f"Tool failed: {type(e).__name__}: {e}")
+    ```
+93. NEVER disable `handle_tool_errors` unless you have a `RetryPolicy` on the tool node — unhandled tool exceptions will crash the graph run
+
+## Swarm / Handoff Pattern
+
+94. The swarm pattern: agents hand off directly to each other via `Command` — no central supervisor, each agent decides the next agent:
+    ```python
+    def researcher(state: MessagesState) -> Command[Literal["writer", "__end__"]]:
+        response = model.invoke(state["messages"])
+        if needs_writing(response):
+            return Command(
+                update={"messages": [response]},
+                goto="writer",
+            )
+        return Command(update={"messages": [response]}, goto=END)
+
+    def writer(state: MessagesState) -> Command[Literal["researcher", "__end__"]]:
+        response = model.invoke(state["messages"])
+        if needs_more_research(response):
+            return Command(update={"messages": [response]}, goto="researcher")
+        return Command(update={"messages": [response]}, goto=END)
+    ```
+95. Use supervisor when you need centralized control and audit trail — use swarm when agents are peers and handoff logic is local to each agent
+96. Swarm graphs MUST have a termination condition in every agent — without `goto=END` paths the graph loops forever
+
+## Custom Streaming (StreamWriter)
+
+97. Use `get_stream_writer()` inside a node to push custom data to the stream without including it in graph state — use for progress updates in long-running nodes:
+    ```python
+    from langgraph.config import get_stream_writer
+    import asyncio
+
+    async def process_documents(state: State) -> dict:
+        write = get_stream_writer()  # get writer for this run
+        docs = state["documents"]
+
+        results = []
+        for i, doc in enumerate(docs):
+            result = await process(doc)
+            results.append(result)
+            write({"progress": f"{i+1}/{len(docs)}", "doc": doc["id"]})  # stream immediately
+
+        return {"results": results}
+
+    # Client reads custom stream
+    async for chunk in graph.astream(input, config, stream_mode="custom"):
+        print(chunk)  # {"progress": "1/10", "doc": "doc-abc"}
+    ```
+98. `stream_mode="custom"` only receives `write()` calls — use `stream_mode=["custom", "updates"]` to receive both custom events and node output events
+
+## Store: Memory Deletion (GDPR)
+
+99. Implement memory deletion with `store.adelete()` — close the loop on rule 46 (right to be forgotten):
+    ```python
+    from langgraph.store.postgres.aio import AsyncPostgresStore
+
+    async def delete_user_memories(user_id: str, store: AsyncPostgresStore) -> int:
+        # List all items in user's namespace
+        namespace = ("memories", user_id)
+        items = await store.alist(namespace)
+        # Delete each one
+        for item in items:
+            await store.adelete(namespace, item.key)
+        return len(items)
+    ```
+100. `store.alist(namespace_prefix)` lists all items under a namespace — use it to enumerate before bulk delete
+101. Namespace structure is a tuple of strings: `("memories", user_id)` or `("memories", user_id, "preferences")` — use multi-level namespaces for fine-grained scoping
+
+## Testing LangGraph Graphs
+
+102. Use `InMemorySaver` (not Postgres) for test isolation — each test gets a fresh in-memory checkpointer with no shared state:
+     ```python
+     import pytest
+     from langgraph.checkpoint.memory import InMemorySaver
+
+     def test_chatbot_responds():
+         checkpointer = InMemorySaver()
+         graph = builder.compile(checkpointer=checkpointer)
+         config = {"configurable": {"thread_id": "test-thread-1"}}
+
+         result = graph.invoke(
+             {"messages": [HumanMessage("Hello")]},
+             config
+         )
+         assert result["messages"][-1].content != ""
+
+     def test_multi_turn_memory():
+         checkpointer = InMemorySaver()
+         graph = builder.compile(checkpointer=checkpointer)
+         config = {"configurable": {"thread_id": "test-thread-2"}}
+
+         graph.invoke({"messages": [HumanMessage("My name is Alice")]}, config)
+         result = graph.invoke({"messages": [HumanMessage("What's my name?")]}, config)
+         assert "Alice" in result["messages"][-1].content
+     ```
+103. Use a unique `thread_id` per test — shared `thread_id` across tests will accumulate state and cause flaky tests
+104. Mock LLM calls at the `ChatAnthropic` or `AsyncAnthropic` level, not at HTTP level — same pattern as `anthropic-patterns.md` rule for testing
+105. Test HITL flows by asserting on `snapshot.next` after the first `invoke()` call, then calling `invoke(Command(resume=...), config)` and asserting on the final state
